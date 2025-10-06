@@ -2,7 +2,6 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('TkAgg')  # or 'Qt5Agg' - makes windows non-blocking
 from pathlib import Path
 import re
 from tqdm import tqdm 
