@@ -166,6 +166,97 @@ def plot_voronoi_diagram(df_with_coord, vor, metadata):
     
     return fig
 
+def plot_size_histogram(skyrmion_data, metadata, bins='auto', show_kde=True):
+    """Create histogram of skyrmion sizes - Streamlit version."""
+    from scipy import stats
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    areas = skyrmion_data['Area'].values
+    
+    # Create histogram
+    n, bins_edges, patches = ax.hist(areas, bins=bins, alpha=0.7, 
+                                       color='steelblue', edgecolor='black',
+                                       density=True, label='Data')
+    
+    # Add KDE overlay if requested
+    if show_kde:
+        kde = stats.gaussian_kde(areas)
+        x_range = np.linspace(areas.min(), areas.max(), 200)
+        ax.plot(x_range, kde(x_range), 'r-', linewidth=2, 
+                label='Kernel Density Estimate')
+    
+    # Statistical lines
+    mean_area = areas.mean()
+    median_area = np.median(areas)
+    ax.axvline(mean_area, color='darkgreen', linestyle='--', linewidth=2, 
+               label=f'Mean: {mean_area:.1f}')
+    ax.axvline(median_area, color='orange', linestyle='--', linewidth=2, 
+               label=f'Median: {median_area:.1f}')
+    
+    # Labels and title
+    ax.set_xlabel('Skyrmion Area (pixels²)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Probability Density', fontsize=12, fontweight='bold')
+    
+    title = f"Size Distribution: Field={metadata['field']}Oe, T={metadata['temperature']}K"
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(True, alpha=0.3)
+    
+    # Add statistics text box
+    stats_text = f"n = {len(areas)}\n"
+    stats_text += f"Mean = {mean_area:.1f} ± {areas.std():.1f}\n"
+    stats_text += f"Median = {median_area:.1f}\n"
+    stats_text += f"Range = [{areas.min():.0f}, {areas.max():.0f}]\n"
+    stats_text += f"Skewness = {stats.skew(areas):.2f}\n"
+    stats_text += f"Kurtosis = {stats.kurtosis(areas):.2f}"
+    
+    ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
+            verticalalignment='top', horizontalalignment='right',
+            fontsize=9, family='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    return fig
+
+
+def assess_distribution_modality(skyrmion_data):
+    """Assess whether size distribution is unimodal or multimodal."""
+    from scipy import stats
+    
+    areas = skyrmion_data['Area'].values
+    
+    # Basic statistics
+    skewness = stats.skew(areas)
+    kurtosis = stats.kurtosis(areas)
+    
+    # Simple bimodality coefficient (BC)
+    n = len(areas)
+    BC = (skewness**2 + 1) / (kurtosis + 3 * (n-1)**2 / ((n-2)*(n-3)))
+    
+    assessment = {
+        'n_skyrmions': n,
+        'mean': areas.mean(),
+        'std': areas.std(),
+        'skewness': skewness,
+        'kurtosis': kurtosis,
+        'bimodality_coefficient': BC,
+        'likely_bimodal': BC > 0.555 if n > 20 else None,
+        'interpretation': ''
+    }
+    
+    # Interpretation
+    if n < 20:
+        assessment['interpretation'] = "Sample size too small for reliable modality assessment"
+    elif BC > 0.555:
+        assessment['interpretation'] = f"Distribution suggests bimodality (BC={BC:.3f} > 0.555). This may indicate multiple topological charge populations."
+    else:
+        assessment['interpretation'] = f"Distribution appears unimodal (BC={BC:.3f} < 0.555). This suggests a single topological charge phase."
+    
+    return assessment
+
 
 # ============================================================
 # MAIN APP
@@ -216,6 +307,30 @@ def main():
                     st.subheader("📊 Statistics")
                     display_stats_cards(stats, coord_stats)
                     
+                    # NEW: Size Distribution Analysis
+                    st.markdown("---")
+                    st.subheader("📈 Size Distribution Analysis")
+                    
+                    from scipy import stats as scipy_stats
+                    modality = assess_distribution_modality(df_with_coord)
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Bimodality Coefficient", f"{modality['bimodality_coefficient']:.3f}")
+                    with col2:
+                        st.metric("Skewness", f"{modality['skewness']:.2f}")
+                    with col3:
+                        st.metric("Kurtosis", f"{modality['kurtosis']:.2f}")
+                    
+                    # Interpretation
+                    if modality['likely_bimodal'] is not None:
+                        if modality['likely_bimodal']:
+                            st.info("🔬 " + modality['interpretation'])
+                        else:
+                            st.success("✓ " + modality['interpretation'])
+                    else:
+                        st.warning("⚠️ " + modality['interpretation'])
+                    
                     # Detailed stats in expander
                     with st.expander("🔍 View Detailed Statistics"):
                         col1, col2 = st.columns(2)
@@ -246,7 +361,8 @@ def main():
                     st.markdown("---")
                     st.subheader("📈 Visualizations")
                     
-                    tab1, tab2, tab3 = st.tabs(["🎯 Scatter Plot", "🕸️ Voronoi Diagram", "📋 Data Table"])
+                    tab1, tab2, tab3, tab4 = st.tabs(["🎯 Scatter Plot", "🕸️ Voronoi Diagram", 
+                                                       "📊 Size Histogram", "📋 Data Table"])
                     
                     with tab1:
                         fig1 = plot_interactive_scatter(df_with_coord, metadata)
@@ -259,6 +375,35 @@ def main():
                         plt.close()
                     
                     with tab3:
+                        # NEW: Size histogram tab
+                        st.markdown("### Skyrmion Size Distribution")
+                        st.markdown("""
+                        **Hypothesis**: Bimodal distributions may indicate multiple topological charge populations, 
+                        while unimodal distributions suggest a single topological charge phase.
+                        """)
+                        
+                        # Create histogram with user controls
+                        col1, col2 = st.columns([1, 3])
+                        with col1:
+                            bins_choice = st.selectbox("Bins", ['auto', 'sturges', 'fd', 'sqrt', 10, 15, 20, 30])
+                            show_kde = st.checkbox("Show KDE", value=True)
+                        
+                        fig3 = plot_size_histogram(df_with_coord, metadata, bins=bins_choice, show_kde=show_kde)
+                        st.pyplot(fig3)
+                        plt.close()
+                        
+                        # Additional statistical tests
+                        with st.expander("📊 Advanced Statistical Tests"):
+                            st.markdown("**Normality Test (Shapiro-Wilk)**")
+                            from scipy import stats as scipy_stats
+                            stat, p_value = scipy_stats.shapiro(df_with_coord['Area'].values)
+                            st.write(f"Test statistic: {stat:.4f}, p-value: {p_value:.4f}")
+                            if p_value < 0.05:
+                                st.write("✗ Distribution is **not normally distributed** (p < 0.05)")
+                            else:
+                                st.write("✓ Distribution is consistent with normal distribution (p ≥ 0.05)")
+                    
+                    with tab4:
                         st.dataframe(df_with_coord, width='stretch')
                         
                         # Download button
@@ -273,7 +418,6 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Error processing file: {e}")
                     st.exception(e)
-    
 # ============================================================
     # BATCH MODE
     # ============================================================
