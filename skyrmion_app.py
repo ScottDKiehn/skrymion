@@ -266,6 +266,81 @@ def plot_size_histogram(skyrmion_data, metadata, bins='auto', show_kde=True, sca
     return fig
 
 
+def plot_size_boxplot(skyrmion_data, metadata, scale_factor=1.0, unit_name='pixels'):
+    """Create box and whisker plot of skyrmion sizes - Streamlit version."""
+    from scipy import stats
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    areas = skyrmion_data['Area'].values
+    # Convert area to diameter: d = 2 * sqrt(A/π)
+    diameters = 2 * np.sqrt(areas / np.pi) * scale_factor
+
+    # Create box plot
+    bp = ax.boxplot([diameters],
+                     vert=True,
+                     patch_artist=True,
+                     widths=0.5,
+                     showmeans=True,
+                     meanprops=dict(marker='D', markerfacecolor='red', markeredgecolor='red', markersize=10),
+                     medianprops=dict(color='darkgreen', linewidth=2),
+                     boxprops=dict(facecolor='steelblue', alpha=0.7, linewidth=2),
+                     whiskerprops=dict(linewidth=2),
+                     capprops=dict(linewidth=2),
+                     flierprops=dict(marker='o', markerfacecolor='orange', markersize=6, alpha=0.5))
+
+    # Add scatter points with jitter for better visibility
+    y = diameters
+    x = np.random.normal(1, 0.04, size=len(y))  # Add horizontal jitter
+    ax.scatter(x, y, alpha=0.3, s=20, color='gray', zorder=1)
+
+    # Calculate statistics
+    q1 = np.percentile(diameters, 25)
+    q3 = np.percentile(diameters, 75)
+    median = np.median(diameters)
+    mean = diameters.mean()
+    iqr = q3 - q1
+    lower_whisker = max(diameters.min(), q1 - 1.5*iqr)
+    upper_whisker = min(diameters.max(), q3 + 1.5*iqr)
+
+    # Add horizontal reference lines for quartiles
+    ax.axhline(median, color='darkgreen', linestyle='--', linewidth=1.5, alpha=0.7, label=f'Median: {median:.1f}')
+    ax.axhline(mean, color='red', linestyle='--', linewidth=1.5, alpha=0.7, label=f'Mean: {mean:.1f}')
+    ax.axhline(q1, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+    ax.axhline(q3, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+
+    # Labels and title
+    ax.set_ylabel(f'Skyrmion Diameter ({unit_name})', fontsize=12, fontweight='bold')
+    ax.set_xticks([1])
+    ax.set_xticklabels(['Diameter Distribution'])
+
+    title = f"Box Plot: Field={metadata['field']}Oe, T={metadata['temperature']}K"
+    ax.set_title(title, fontsize=14, fontweight='bold')
+
+    ax.legend(loc='upper right', fontsize=10)
+    ax.grid(True, axis='y', alpha=0.3)
+
+    # Add statistics text box
+    stats_text = f"n = {len(diameters)}\n"
+    stats_text += f"Min = {diameters.min():.1f} {unit_name}\n"
+    stats_text += f"Q1 (25%) = {q1:.1f} {unit_name}\n"
+    stats_text += f"Median (50%) = {median:.1f} {unit_name}\n"
+    stats_text += f"Mean = {mean:.1f} {unit_name}\n"
+    stats_text += f"Q3 (75%) = {q3:.1f} {unit_name}\n"
+    stats_text += f"Max = {diameters.max():.1f} {unit_name}\n"
+    stats_text += f"IQR = {iqr:.1f} {unit_name}\n"
+    stats_text += f"Outliers (beyond 1.5×IQR) = {np.sum((diameters < lower_whisker) | (diameters > upper_whisker))}"
+
+    ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
+            verticalalignment='top', horizontalalignment='right',
+            fontsize=9, family='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    plt.tight_layout()
+
+    return fig
+
+
 def plot_coordination_distribution(coord_stats, metadata):
     """Create bar chart showing coordination number distribution."""
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -353,6 +428,9 @@ def assess_distribution_modality(skyrmion_data, scale_factor=1.0, unit_name='pix
         'min': diameters.min(),
         'max': diameters.max(),
         'range': diameters.max() - diameters.min(),
+        'q1': np.percentile(diameters, 25),
+        'q3': np.percentile(diameters, 75),
+        'iqr': np.percentile(diameters, 75) - np.percentile(diameters, 25),
         'skewness': skewness,
         'kurtosis': kurtosis,
         'bimodality_coefficient': BC,
@@ -418,8 +496,11 @@ def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, s
         f'median_diameter_{unit_display}': modality['median'],
         f'std_diameter_{unit_display}': modality['std'],
         f'min_diameter_{unit_display}': modality['min'],
+        f'q1_diameter_{unit_display}': modality['q1'],
+        f'q3_diameter_{unit_display}': modality['q3'],
         f'max_diameter_{unit_display}': modality['max'],
         f'range_diameter_{unit_display}': modality['range'],
+        f'iqr_diameter_{unit_display}': modality['iqr'],
         'skewness': modality['skewness'],
         'kurtosis': modality['kurtosis'],
         'bimodality_coefficient': modality['bimodality_coefficient'],
@@ -601,6 +682,19 @@ def main():
                         fig3 = plot_size_histogram(df_with_coord, metadata, bins=bins_choice, show_kde=show_kde,
                                                     scale_factor=scale_factor, unit_name=unit_display)
                         st.pyplot(fig3)
+                        plt.close()
+
+                        # Box and whisker plot
+                        st.markdown("---")
+                        st.markdown("### Box and Whisker Plot")
+                        st.markdown("""
+                        **Box plot** shows the five-number summary (min, Q1, median, Q3, max) and outliers.
+                        The box spans Q1 to Q3 (interquartile range), with the median line inside.
+                        Whiskers extend to 1.5×IQR, and points beyond are marked as outliers.
+                        """)
+
+                        fig_box = plot_size_boxplot(df_with_coord, metadata, scale_factor=scale_factor, unit_name=unit_display)
+                        st.pyplot(fig_box)
                         plt.close()
 
                         # Additional statistical tests
