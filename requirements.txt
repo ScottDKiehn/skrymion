@@ -4,4 +4,5 @@ matplotlib
 scipy
 openpyxl
 streamlit
+plotly
 tqdm

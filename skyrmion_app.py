@@ -83,32 +83,50 @@ def process_uploaded_file(uploaded_file):
 def display_stats_cards(stats, coord_stats):
     """Display statistics in nice cards."""
     col1, col2, col3, col4 = st.columns(4)
-    
+
     with col1:
         st.metric("🔢 Skyrmion Count", f"{stats['n_skyrmions']}")
         st.metric("📏 Mean Area", f"{stats['mean_area']:.1f} px²")
-    
+
     with col2:
         st.metric("🌡️ Temperature", f"{stats['temperature']} K")
         st.metric("🧲 Field", f"{stats['field']} Oe")
-    
+
     with col3:
         st.metric("📊 Density", f"{stats['number_density']:.6f} /px²")
         st.metric("📐 Coverage", f"{stats['area_coverage']:.2%}")
-    
+
     with col4:
         st.metric("🔗 Mean Coord.", f"{coord_stats['mean_coordination']:.2f}")
         st.metric("📦 Packing Eff.", f"{coord_stats['packing_efficiency']:.2%}")
 
+    # Add CN distribution summary below cards
+    coord_dist = coord_stats['coordination_distribution']
+    cn_values = np.arange(len(coord_dist))
+    mask = coord_dist > 0
+    cn_present = cn_values[mask]
+    counts_present = coord_dist[mask]
+    percentages = (counts_present / coord_dist.sum()) * 100
 
-def plot_interactive_scatter(df_with_coord, metadata):
+    # Show top 3 coordination numbers
+    top_indices = np.argsort(percentages)[::-1][:3]  # Top 3
+    top_cn_text = ", ".join([f"CN={cn_present[i]}: {percentages[i]:.1f}%" for i in top_indices])
+
+    st.caption(f"**Top Coordination Numbers**: {top_cn_text}")
+
+
+def plot_interactive_scatter(df_with_coord, metadata, scale_factor=1.0, unit_name='pixels'):
     """Create an interactive scatter plot."""
     fig, ax = plt.subplots(figsize=(10, 10))
-    
+
+    # Apply scale factor for display
+    x_scaled = df_with_coord['X'] * scale_factor
+    y_scaled = df_with_coord['Y'] * scale_factor
+
     scatter = ax.scatter(
-        df_with_coord['X'], 
-        df_with_coord['Y'],
-        s=df_with_coord['Area'] / 5,
+        x_scaled,
+        y_scaled,
+        s=df_with_coord['Area'] / 5,  # Keep visual size constant (don't scale with units)
         alpha=0.6,
         c=df_with_coord['coordination'],
         cmap='RdYlGn',
@@ -117,33 +135,46 @@ def plot_interactive_scatter(df_with_coord, metadata):
         edgecolors='black',
         linewidth=0.5
     )
-    
+
     cbar = plt.colorbar(scatter, ax=ax)
     cbar.set_label('Coordination Number', rotation=270, labelpad=20)
-    
-    ax.set_xlabel('X Position (pixels)', fontsize=12)
-    ax.set_ylabel('Y Position (pixels)', fontsize=12)
-    ax.set_title(f"Field={metadata['field']}Oe, T={metadata['temperature']}K", 
+
+    ax.set_xlabel(f'X Position ({unit_name})', fontsize=12)
+    ax.set_ylabel(f'Y Position ({unit_name})', fontsize=12)
+    ax.set_title(f"Field={metadata['field']}Oe, T={metadata['temperature']}K",
                  fontsize=14, fontweight='bold')
     ax.set_aspect('equal')
     ax.invert_yaxis()
     ax.grid(True, alpha=0.3)
-    
+
     return fig
 
 
-def plot_voronoi_diagram(df_with_coord, vor, metadata):
+def plot_voronoi_diagram(df_with_coord, vor, metadata, scale_factor=1.0, unit_name='pixels'):
     """Create Voronoi diagram."""
-    from scipy.spatial import voronoi_plot_2d
-    
+    from scipy.spatial import voronoi_plot_2d, Voronoi
+
     fig, ax = plt.subplots(figsize=(12, 12))
-    
-    voronoi_plot_2d(vor, ax=ax, show_vertices=False, line_colors='gray', 
+
+    # Create scaled Voronoi for visualization if needed
+    if scale_factor != 1.0:
+        # Recompute Voronoi with scaled coordinates
+        scaled_points = df_with_coord[['X', 'Y']].values * scale_factor
+        vor_display = Voronoi(scaled_points)
+    else:
+        vor_display = vor
+
+    # Draw Voronoi diagram
+    voronoi_plot_2d(vor_display, ax=ax, show_vertices=False, line_colors='gray',
                     line_width=1, line_alpha=0.6, point_size=0)
-    
+
+    # Apply scale factor for display
+    x_scaled = df_with_coord['X'] * scale_factor
+    y_scaled = df_with_coord['Y'] * scale_factor
+
     scatter = ax.scatter(
-        df_with_coord['X'], 
-        df_with_coord['Y'],
+        x_scaled,
+        y_scaled,
         c=df_with_coord['coordination'],
         s=100,
         cmap='RdYlGn',
@@ -153,100 +184,179 @@ def plot_voronoi_diagram(df_with_coord, vor, metadata):
         linewidth=1,
         zorder=10
     )
-    
+
     cbar = plt.colorbar(scatter, ax=ax)
     cbar.set_label('Coordination Number', rotation=270, labelpad=20)
-    
-    ax.set_xlabel('X Position (pixels)', fontsize=12)
-    ax.set_ylabel('Y Position (pixels)', fontsize=12)
-    ax.set_title(f"Voronoi Tessellation: Field={metadata['field']}Oe, T={metadata['temperature']}K", 
+
+    ax.set_xlabel(f'X Position ({unit_name})', fontsize=12)
+    ax.set_ylabel(f'Y Position ({unit_name})', fontsize=12)
+    ax.set_title(f"Voronoi Tessellation: Field={metadata['field']}Oe, T={metadata['temperature']}K",
                  fontsize=14, fontweight='bold')
     ax.set_aspect('equal')
     ax.invert_yaxis()
-    
+
     return fig
 
-def plot_size_histogram(skyrmion_data, metadata, bins='auto', show_kde=True):
+def plot_size_histogram(skyrmion_data, metadata, bins='auto', show_kde=True, scale_factor=1.0, unit_name='pixels'):
     """Create histogram of skyrmion sizes - Streamlit version."""
     from scipy import stats
-    
+
     fig, ax = plt.subplots(figsize=(10, 6))
-    
+
     areas = skyrmion_data['Area'].values
-    
-    # Create histogram
-    n, bins_edges, patches = ax.hist(areas, bins=bins, alpha=0.7, 
+    # Convert area to diameter: d = 2 * sqrt(A/π)
+    diameters = 2 * np.sqrt(areas / np.pi) * scale_factor
+
+    # Create histogram with percentage y-axis
+    weights = np.ones_like(diameters) / len(diameters) * 100
+
+    # Fix: Compute bin edges first if using automatic estimation (doesn't work with weights)
+    if isinstance(bins, str):
+        bins = np.histogram_bin_edges(diameters, bins=bins)
+
+    n, bins_edges, patches = ax.hist(diameters, bins=bins, alpha=0.7,
                                        color='steelblue', edgecolor='black',
-                                       density=True, label='Data')
-    
-    # Add KDE overlay if requested
+                                       weights=weights, label='Data')
+
+    # Add KDE overlay if requested (scaled to percentage)
     if show_kde:
-        kde = stats.gaussian_kde(areas)
-        x_range = np.linspace(areas.min(), areas.max(), 200)
-        ax.plot(x_range, kde(x_range), 'r-', linewidth=2, 
+        kde = stats.gaussian_kde(diameters)
+        x_range = np.linspace(diameters.min(), diameters.max(), 200)
+        # Scale KDE to match percentage histogram
+        kde_values = kde(x_range)
+        # Integrate KDE to get proper scaling
+        bin_width = (diameters.max() - diameters.min()) / (len(np.histogram(diameters, bins=bins)[0]))
+        kde_scaled = kde_values * bin_width * 100
+        ax.plot(x_range, kde_scaled, 'r-', linewidth=2,
                 label='Kernel Density Estimate')
-    
+
     # Statistical lines
-    mean_area = areas.mean()
-    median_area = np.median(areas)
-    ax.axvline(mean_area, color='darkgreen', linestyle='--', linewidth=2, 
-               label=f'Mean: {mean_area:.1f}')
-    ax.axvline(median_area, color='orange', linestyle='--', linewidth=2, 
-               label=f'Median: {median_area:.1f}')
-    
+    mean_diameter = diameters.mean()
+    median_diameter = np.median(diameters)
+    ax.axvline(mean_diameter, color='darkgreen', linestyle='--', linewidth=2,
+               label=f'Mean: {mean_diameter:.1f}')
+    ax.axvline(median_diameter, color='orange', linestyle='--', linewidth=2,
+               label=f'Median: {median_diameter:.1f}')
+
     # Labels and title
-    ax.set_xlabel('Skyrmion Area (pixels²)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Probability Density', fontsize=12, fontweight='bold')
-    
+    ax.set_xlabel(f'Skyrmion Diameter ({unit_name})', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
+
     title = f"Size Distribution: Field={metadata['field']}Oe, T={metadata['temperature']}K"
     ax.set_title(title, fontsize=14, fontweight='bold')
-    
+
     ax.legend(loc='best', fontsize=10)
     ax.grid(True, alpha=0.3)
-    
+
     # Add statistics text box
-    stats_text = f"n = {len(areas)}\n"
-    stats_text += f"Mean = {mean_area:.1f} ± {areas.std():.1f}\n"
-    stats_text += f"Median = {median_area:.1f}\n"
-    stats_text += f"Range = [{areas.min():.0f}, {areas.max():.0f}]\n"
-    stats_text += f"Skewness = {stats.skew(areas):.2f}\n"
-    stats_text += f"Kurtosis = {stats.kurtosis(areas):.2f}"
-    
+    stats_text = f"n = {len(diameters)}\n"
+    stats_text += f"Mean Diameter = {mean_diameter:.1f} ± {diameters.std():.1f} {unit_name}\n"
+    stats_text += f"Median Diameter = {median_diameter:.1f} {unit_name}\n"
+    stats_text += f"Range = [{diameters.min():.1f}, {diameters.max():.1f}] {unit_name}\n"
+    stats_text += f"Skewness = {stats.skew(diameters):.2f}\n"
+    stats_text += f"Kurtosis = {stats.kurtosis(diameters):.2f}"
+
     ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
             verticalalignment='top', horizontalalignment='right',
             fontsize=9, family='monospace',
             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-    
+
     plt.tight_layout()
-    
+
     return fig
 
 
-def assess_distribution_modality(skyrmion_data):
+def plot_coordination_distribution(coord_stats, metadata):
+    """Create bar chart showing coordination number distribution."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    coord_dist = coord_stats['coordination_distribution']
+    cn_values = np.arange(len(coord_dist))
+
+    # Only plot CN values that actually exist
+    mask = coord_dist > 0
+    cn_values_present = cn_values[mask]
+    counts_present = coord_dist[mask]
+
+    # Convert counts to percentages
+    total = coord_dist.sum()
+    percentages = (counts_present / total) * 100
+
+    # Color coding: green for CN=6 (ideal), gradient for others
+    colors = []
+    for cn in cn_values_present:
+        if cn == 6:
+            colors.append('#2ca02c')  # Green for ideal packing
+        elif cn == 5 or cn == 7:
+            colors.append('#ff7f0e')  # Orange for near-ideal
+        else:
+            colors.append('#d62728')  # Red for defects
+
+    bars = ax.bar(cn_values_present, percentages, color=colors,
+                   edgecolor='black', alpha=0.7, width=0.6)
+
+    ax.set_xlabel('Coordination Number', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Fraction (%)', fontsize=12, fontweight='bold')
+    ax.set_title(f'Coordination Distribution: Field={metadata["field"]}Oe, T={metadata["temperature"]}K',
+                 fontsize=14, fontweight='bold')
+    ax.set_xticks(cn_values_present)
+    ax.grid(True, alpha=0.3, axis='y')
+
+    # Add percentage labels on bars
+    for bar, pct, cn, count in zip(bars, percentages, cn_values_present, counts_present):
+        height = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width()/2., height,
+                f'{pct:.1f}%\n(n={int(count)})',
+                ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+    # Add legend explaining colors
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='#2ca02c', edgecolor='black', alpha=0.7, label='CN=6 (Ideal hexagonal)'),
+        Patch(facecolor='#ff7f0e', edgecolor='black', alpha=0.7, label='CN=5,7 (Near-ideal)'),
+        Patch(facecolor='#d62728', edgecolor='black', alpha=0.7, label='CN≤4,≥8 (Defects)')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
+
+    # Add summary text
+    summary_text = f"Mean CN: {coord_stats['mean_coordination']:.2f}\n"
+    summary_text += f"Packing Efficiency: {coord_stats['packing_efficiency']:.1%}"
+    ax.text(0.02, 0.98, summary_text, transform=ax.transAxes,
+            verticalalignment='top', fontsize=10, family='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    plt.tight_layout()
+    return fig
+
+
+def assess_distribution_modality(skyrmion_data, scale_factor=1.0, unit_name='pixels'):
     """Assess whether size distribution is unimodal or multimodal."""
     from scipy import stats
-    
+
     areas = skyrmion_data['Area'].values
-    
+    # Convert to diameter for assessment
+    diameters = 2 * np.sqrt(areas / np.pi) * scale_factor
+
     # Basic statistics
-    skewness = stats.skew(areas)
-    kurtosis = stats.kurtosis(areas)
-    
+    skewness = stats.skew(diameters)
+    kurtosis = stats.kurtosis(diameters)
+
     # Simple bimodality coefficient (BC)
-    n = len(areas)
+    n = len(diameters)
     BC = (skewness**2 + 1) / (kurtosis + 3 * (n-1)**2 / ((n-2)*(n-3)))
-    
+
     assessment = {
         'n_skyrmions': n,
-        'mean': areas.mean(),
-        'std': areas.std(),
+        'mean': diameters.mean(),
+        'std': diameters.std(),
         'skewness': skewness,
         'kurtosis': kurtosis,
         'bimodality_coefficient': BC,
         'likely_bimodal': BC > 0.555 if n > 20 else None,
-        'interpretation': ''
+        'interpretation': '',
+        'unit_name': unit_name
     }
-    
+
     # Interpretation
     if n < 20:
         assessment['interpretation'] = "Sample size too small for reliable modality assessment"
@@ -254,8 +364,74 @@ def assess_distribution_modality(skyrmion_data):
         assessment['interpretation'] = f"Distribution suggests bimodality (BC={BC:.3f} > 0.555). This may indicate multiple topological charge populations."
     else:
         assessment['interpretation'] = f"Distribution appears unimodal (BC={BC:.3f} < 0.555). This suggests a single topological charge phase."
-    
+
     return assessment
+
+
+def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, scale_factor, unit_display):
+    """
+    Create a summary statistics DataFrame for CSV export.
+
+    Returns a single-row DataFrame containing all aggregate metrics.
+    """
+    # Extract metadata (with fallbacks)
+    field = metadata.get('field', None) if metadata else None
+    temperature = metadata.get('temperature', None) if metadata else None
+    sample_id = metadata.get('id', '') if metadata else ''
+
+    # Build summary dictionary
+    summary = {
+        # Experimental metadata
+        'filename': filename,
+        'field_oe': field,
+        'temperature_k': temperature,
+        'sample_id': sample_id,
+
+        # Basic statistics
+        'n_skyrmions': stats['n_skyrmions'],
+        'number_density': stats['number_density'],
+        'area_coverage': stats['area_coverage'],
+        'fov_width_px': stats['fov_width'],
+        'fov_height_px': stats['fov_height'],
+        'fov_area_px2': stats['fov_area'],
+
+        # Size distribution statistics in pixels
+        'mean_area_px2': stats['mean_area'],
+        'median_area_px2': stats['median_area'],
+        'std_area_px2': stats['std_area'],
+        'min_area_px2': stats['min_area'],
+        'max_area_px2': stats['max_area'],
+
+        # Size distribution statistics (converted units)
+        f'mean_area_{unit_display}2': stats['mean_area'] * (scale_factor ** 2),
+        f'median_area_{unit_display}2': stats['median_area'] * (scale_factor ** 2),
+        f'std_area_{unit_display}2': stats['std_area'] * (scale_factor ** 2),
+        f'min_area_{unit_display}2': stats['min_area'] * (scale_factor ** 2),
+        f'max_area_{unit_display}2': stats['max_area'] * (scale_factor ** 2),
+
+        # Size distribution modality metrics (already in converted units from modality)
+        f'mean_diameter_{unit_display}': modality['mean'],
+        f'std_diameter_{unit_display}': modality['std'],
+        'skewness': modality['skewness'],
+        'kurtosis': modality['kurtosis'],
+        'bimodality_coefficient': modality['bimodality_coefficient'],
+        'likely_bimodal': modality.get('likely_bimodal', None),
+
+        # Coordination statistics
+        'mean_coordination': coord_stats['mean_coordination'],
+        'median_coordination': coord_stats['median_coordination'],
+        'std_coordination': coord_stats['std_coordination'],
+        'min_coordination': coord_stats['min_coordination'],
+        'max_coordination': coord_stats['max_coordination'],
+        'packing_efficiency': coord_stats['packing_efficiency'],
+
+        # Units
+        'scale_factor': scale_factor,
+        'unit_name': unit_display
+    }
+
+    # Convert to single-row DataFrame
+    return pd.DataFrame([summary])
 
 
 # ============================================================
@@ -268,10 +444,36 @@ def main():
     
     # Sidebar for navigation
     st.sidebar.title("Navigation")
-    mode = st.sidebar.radio("Select Mode:", 
-                            ["📄 Single File Analysis", 
-                             "📦 Batch Analysis"])
-    
+    mode = st.sidebar.radio("Select Mode:",
+                            ["📄 Single File Analysis",
+                             "📦 Batch Analysis",
+                             "🤖 ML Detection"])
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Unit Conversion")
+
+    # Scale factor input
+    scale_factor = st.sidebar.number_input(
+        "Length Scale (unit/pixel)",
+        min_value=0.0,
+        value=1.0,
+        step=0.1,
+        format="%.3f",
+        help="Enter the scale factor to convert pixels to physical units (e.g., 5.2 for nm/pixel). Default is 1.0 (pixels)."
+    )
+
+    unit_name = st.sidebar.text_input(
+        "Unit Name",
+        value="pixels" if scale_factor == 1.0 else "nm",
+        help="Name of the physical unit (e.g., 'nm', 'μm', 'Å')"
+    )
+
+    # Update unit name display
+    if scale_factor == 1.0:
+        unit_display = "pixels"
+    else:
+        unit_display = unit_name
+
     st.sidebar.markdown("---")
     st.sidebar.markdown("### About")
     st.sidebar.info(
@@ -310,9 +512,9 @@ def main():
                     # NEW: Size Distribution Analysis
                     st.markdown("---")
                     st.subheader("📈 Size Distribution Analysis")
-                    
+
                     from scipy import stats as scipy_stats
-                    modality = assess_distribution_modality(df_with_coord)
+                    modality = assess_distribution_modality(df_with_coord, scale_factor, unit_display)
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -360,38 +562,39 @@ def main():
                     # Visualizations
                     st.markdown("---")
                     st.subheader("📈 Visualizations")
-                    
-                    tab1, tab2, tab3, tab4 = st.tabs(["🎯 Scatter Plot", "🕸️ Voronoi Diagram", 
-                                                       "📊 Size Histogram", "📋 Data Table"])
-                    
+
+                    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎯 Scatter Plot", "🕸️ Voronoi Diagram",
+                                                       "📊 Size Histogram", "🔗 Coordination Distribution", "📋 Data Table"])
+
                     with tab1:
-                        fig1 = plot_interactive_scatter(df_with_coord, metadata)
+                        fig1 = plot_interactive_scatter(df_with_coord, metadata, scale_factor, unit_display)
                         st.pyplot(fig1)
                         plt.close()
-                    
+
                     with tab2:
-                        fig2 = plot_voronoi_diagram(df_with_coord, vor, metadata)
+                        fig2 = plot_voronoi_diagram(df_with_coord, vor, metadata, scale_factor, unit_display)
                         st.pyplot(fig2)
                         plt.close()
-                    
+
                     with tab3:
-                        # NEW: Size histogram tab
+                        # Size histogram tab
                         st.markdown("### Skyrmion Size Distribution")
                         st.markdown("""
-                        **Hypothesis**: Bimodal distributions may indicate multiple topological charge populations, 
+                        **Hypothesis**: Bimodal distributions may indicate multiple topological charge populations,
                         while unimodal distributions suggest a single topological charge phase.
                         """)
-                        
+
                         # Create histogram with user controls
                         col1, col2 = st.columns([1, 3])
                         with col1:
                             bins_choice = st.selectbox("Bins", ['auto', 'sturges', 'fd', 'sqrt', 10, 15, 20, 30])
                             show_kde = st.checkbox("Show KDE", value=True)
-                        
-                        fig3 = plot_size_histogram(df_with_coord, metadata, bins=bins_choice, show_kde=show_kde)
+
+                        fig3 = plot_size_histogram(df_with_coord, metadata, bins=bins_choice, show_kde=show_kde,
+                                                    scale_factor=scale_factor, unit_name=unit_display)
                         st.pyplot(fig3)
                         plt.close()
-                        
+
                         # Additional statistical tests
                         with st.expander("📊 Advanced Statistical Tests"):
                             st.markdown("**Normality Test (Shapiro-Wilk)**")
@@ -402,26 +605,110 @@ def main():
                                 st.write("✗ Distribution is **not normally distributed** (p < 0.05)")
                             else:
                                 st.write("✓ Distribution is consistent with normal distribution (p ≥ 0.05)")
-                    
+
                     with tab4:
+                        # Coordination distribution tab
+                        st.markdown("### Coordination Number Distribution")
+                        st.markdown("""
+                        **Coordination number** indicates how many nearest neighbors each skyrmion has.
+                        Ideal hexagonal packing has CN=6. Deviations indicate structural disorder or defects.
+                        """)
+
+                        # Generate text summary of CN fractions
+                        coord_dist = coord_stats['coordination_distribution']
+                        cn_values = np.arange(len(coord_dist))
+                        mask = coord_dist > 0
+                        cn_present = cn_values[mask]
+                        counts_present = coord_dist[mask]
+                        percentages = (counts_present / coord_dist.sum()) * 100
+
+                        cn_summary = ", ".join([f"{pct:.1f}% with CN={cn}" for cn, pct in zip(cn_present, percentages)])
+                        st.info(f"**Distribution**: {cn_summary}")
+
+                        # Plot coordination distribution
+                        fig4 = plot_coordination_distribution(coord_stats, metadata)
+                        st.pyplot(fig4)
+                        plt.close()
+
+                    with tab5:
                         st.dataframe(df_with_coord, width='stretch')
-                        
-                        # Download button
-                        csv = df_with_coord.to_csv(index=False)
-                        st.download_button(
-                            label="📥 Download Data as CSV",
-                            data=csv,
-                            file_name=f"analyzed_{uploaded_file.name}.csv",
-                            mime="text/csv"
-                        )
+
+                        st.markdown("---")
+                        st.markdown("### 📥 Export Options")
+
+                        # Create two columns for download buttons
+                        col1, col2, col3 = st.columns(3)
+
+                        with col1:
+                            # Per-skyrmion data CSV
+                            df_export = df_with_coord.copy()
+
+                            # Add converted columns
+                            df_export[f'X_{unit_display}'] = df_export['X'] * scale_factor
+                            df_export[f'Y_{unit_display}'] = df_export['Y'] * scale_factor
+                            df_export[f'Area_{unit_display}²'] = df_export['Area'] * (scale_factor ** 2)
+                            df_export[f'Diameter_{unit_display}'] = 2 * np.sqrt(df_export['Area'] / np.pi) * scale_factor
+
+                            csv_skyrmions = df_export.to_csv(index=False)
+                            st.download_button(
+                                label="📊 Download Per-Skyrmion Data",
+                                data=csv_skyrmions,
+                                file_name=f"analyzed_{uploaded_file.name.rsplit('.', 1)[0]}.csv",
+                                mime="text/csv",
+                                help="CSV with one row per skyrmion (X, Y, Area, Coordination)"
+                            )
+
+                        with col2:
+                            # Summary statistics CSV
+                            df_summary = create_summary_dataframe(
+                                uploaded_file.name,
+                                metadata,
+                                stats,
+                                coord_stats,
+                                modality,
+                                scale_factor,
+                                unit_display
+                            )
+                            csv_summary = df_summary.to_csv(index=False)
+                            st.download_button(
+                                label="📈 Download Summary Statistics",
+                                data=csv_summary,
+                                file_name=f"summary_{uploaded_file.name.rsplit('.', 1)[0]}.csv",
+                                mime="text/csv",
+                                help="Single-row CSV with all aggregate metrics (bimodality, coordination, etc.)"
+                            )
+
+                        with col3:
+                            # ZIP download with both files
+                            zip_buffer = io.BytesIO()
+                            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                                # Add per-skyrmion CSV
+                                zip_file.writestr(
+                                    f"analyzed_{uploaded_file.name.rsplit('.', 1)[0]}.csv",
+                                    csv_skyrmions
+                                )
+                                # Add summary CSV
+                                zip_file.writestr(
+                                    f"summary_{uploaded_file.name.rsplit('.', 1)[0]}.csv",
+                                    csv_summary
+                                )
+
+                            st.download_button(
+                                label="📦 Download Both (ZIP)",
+                                data=zip_buffer.getvalue(),
+                                file_name=f"analysis_package_{uploaded_file.name.rsplit('.', 1)[0]}.zip",
+                                mime="application/zip",
+                                help="ZIP file containing both per-skyrmion data and summary statistics"
+                            )
                 
                 except Exception as e:
                     st.error(f"❌ Error processing file: {e}")
                     st.exception(e)
-# ============================================================
+
+    # ============================================================
     # BATCH MODE
     # ============================================================
-    else:  # Batch Analysis
+    elif mode == "📦 Batch Analysis":
         st.header("Batch Analysis")
         st.markdown("Upload multiple skyrmion data files for batch processing.")
         
@@ -515,8 +802,17 @@ def main():
                 width='stretch'
             )
             
-            # Download button
-            csv = results_df.to_csv(index=False)
+            # Download button with converted columns
+            df_batch_export = results_df.copy()
+
+            # Add scale factor information
+            df_batch_export['scale_factor'] = scale_factor
+            df_batch_export['unit'] = unit_display
+
+            # Add converted diameter column
+            df_batch_export[f'mean_diameter_{unit_display}'] = 2 * np.sqrt(df_batch_export['mean_area'] / np.pi) * scale_factor
+
+            csv = df_batch_export.to_csv(index=False)
             st.download_button(
                 label="📥 Download Results as CSV",
                 data=csv,
@@ -621,6 +917,768 @@ def main():
                 plt.tight_layout()
                 st.pyplot(fig)
                 plt.close()
+
+    # ============================================================
+    # ML DETECTION MODE
+    # ============================================================
+    else:  # ML Detection
+        st.header("🤖 ML-Powered Skyrmion Detection")
+        st.markdown("""
+        Upload LTEM images for automated skyrmion detection, segmentation, and property extraction
+        using deep learning (StarDist) and topological classification.
+        """)
+
+        # Detection mode selector
+        detection_mode = st.radio(
+            "Detection Mode:",
+            ["📄 Single Image", "📁 Temperature Series (Multiple Images)"],
+            horizontal=True
+        )
+
+        # Optional pixel scale input
+        st.markdown("---")
+        st.subheader("⚙️ Detection Settings")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            use_pixel_scale = st.checkbox("Use physical pixel scale", value=False)
+            if use_pixel_scale:
+                pixel_scale = st.number_input(
+                    "Pixel scale (nm/pixel)",
+                    min_value=0.01,
+                    value=scale_factor,
+                    step=0.1,
+                    format="%.3f"
+                )
+            else:
+                pixel_scale = None
+
+        with col2:
+            show_classification_viz = st.checkbox("Show classification overlay", value=True)
+            st.caption("Blue = Skyrmions (Q=±1), Red = Skyrmioniums (Q=0)")
+
+        # Topological classification parameters
+        st.subheader("🎯 Topological Classification Tuning")
+        st.markdown("Adjust parameters to tune skyrmion vs skyrmionium distinction:")
+        st.info("⚙️ **Note**: Parameter changes take effect when you upload a new image or click 'Run Classification Diagnostics'")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            peak_prominence = st.slider(
+                "Peak Prominence",
+                min_value=0.01,
+                max_value=0.5,
+                value=0.15,
+                step=0.01,
+                help="Minimum peak height to detect (lower = more sensitive)"
+            )
+        with col2:
+            center_window_fraction = st.slider(
+                "Center Window Size (NEW)",
+                min_value=0.1,
+                max_value=0.5,
+                value=0.3,
+                step=0.05,
+                help="Radius fraction defining 'center region' for skyrmionium peaks (scales with skyrmion size)"
+            )
+        with col3:
+            skyrmionium_threshold = st.slider(
+                "Skyrmionium Threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.3,
+                step=0.01,
+                help="Classification cutoff (higher = fewer skyrmioniums)"
+            )
+
+        # NEW: Additional advanced parameters (row 2)
+        col4, col5, col6 = st.columns(3)
+        with col4:
+            top_n_angles = st.slider(
+                "Top-N Angles (NEW)",
+                min_value=1,
+                max_value=4,
+                value=4,
+                step=1,
+                help="Use only the best N diameter angles (2 recommended for noisy data)"
+            )
+        with col5:
+            merge_threshold = st.slider(
+                "Peak Merge Threshold (NEW)",
+                min_value=0.05,
+                max_value=0.3,
+                value=0.15,
+                step=0.05,
+                help="Merge peaks closer than this fraction of radius (prevents split-peak inflation)"
+            )
+        with col6:
+            width_bonus_enabled = st.checkbox(
+                "Width Bonus (NEW)",
+                value=True,
+                help="Give bonus score to wide peaks (compensates for size-dependent peak widths)"
+            )
+
+        # NEW: Advanced angle selection controls
+        with st.expander("🎯 Advanced: Angle Selection Options", expanded=False):
+            st.markdown("""
+            **Purpose**: Fine-tune which diameter angles contribute to classification.
+
+            - **Top-N** (default): Use the N highest scoring angles
+            - **Manual**: Select specific angles you want to use
+            - **Middle Two**: Use only the 2nd and 3rd highest scoring angles (excludes outliers)
+            """)
+
+            angle_selection_mode = st.radio(
+                "Selection Mode",
+                options=['top_n', 'manual', 'middle_two'],
+                format_func=lambda x: {
+                    'top_n': 'Top-N (use best N angles)',
+                    'manual': 'Manual (select specific angles)',
+                    'middle_two': 'Middle Two (exclude highest and lowest)'
+                }[x],
+                index=0,
+                help="Method for selecting which diameter angles to use"
+            )
+
+            if angle_selection_mode == 'manual':
+                st.markdown("**Select which angles to use:**")
+                col_0, col_45, col_90, col_135 = st.columns(4)
+                with col_0:
+                    use_0 = st.checkbox("0° (horizontal)", value=True, key="angle_0")
+                with col_45:
+                    use_45 = st.checkbox("45°", value=True, key="angle_45")
+                with col_90:
+                    use_90 = st.checkbox("90° (vertical)", value=True, key="angle_90")
+                with col_135:
+                    use_135 = st.checkbox("135°", value=True, key="angle_135")
+
+                selected_angles = []
+                if use_0:
+                    selected_angles.append(0)
+                if use_45:
+                    selected_angles.append(1)
+                if use_90:
+                    selected_angles.append(2)
+                if use_135:
+                    selected_angles.append(3)
+
+                if len(selected_angles) == 0:
+                    st.warning("⚠️ You must select at least one angle!")
+                    selected_angles = [0, 1, 2, 3]  # Fallback
+
+            elif angle_selection_mode == 'middle_two':
+                st.info("ℹ️ Using only the 2nd and 3rd highest scoring angles (excludes both highest and lowest outliers)")
+                selected_angles = None
+
+            else:  # top_n mode
+                selected_angles = None
+                st.info(f"ℹ️ Using top-{top_n_angles} mode (configured above)")
+
+        # NEW: Non-linear window scaling controls
+        with st.expander("🔬 Advanced: Non-Linear Window Scaling", expanded=False):
+            st.markdown("""
+            **Purpose**: Eliminate size bias by using logarithmic window scaling.
+
+            - **Small skyrmions** (<30px radius): Get proportionally smaller center windows
+            - **Large skyrmions** (>60px radius): Get proportionally larger center windows
+            - **Formula**: `window_fraction = max(0.08, a + b × log(radius))`
+            """)
+
+            use_nonlinear_window = st.checkbox(
+                "Enable Logarithmic Window Scaling",
+                value=True,
+                help="Use logarithmic scaling instead of fixed fraction. Recommended for mixed-size datasets."
+            )
+
+            if use_nonlinear_window:
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    window_scale_a = st.slider(
+                        "Intercept (a)",
+                        min_value=-0.5,
+                        max_value=0.0,
+                        value=-0.27,
+                        step=0.01,
+                        help="Logarithmic scaling intercept (default: -0.27)"
+                    )
+                with col_b:
+                    window_scale_b = st.slider(
+                        "Slope (b)",
+                        min_value=0.05,
+                        max_value=0.25,
+                        value=0.13,
+                        step=0.01,
+                        help="Logarithmic scaling slope (default: 0.13)"
+                    )
+
+                # Preview plot
+                st.markdown("**Preview: Window Size vs. Skyrmion Radius**")
+
+                radii = np.linspace(10, 100, 100)
+                window_fractions = np.maximum(0.08, window_scale_a + window_scale_b * np.log(radii))
+                window_sizes = window_fractions * radii
+
+                fig_preview, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 3))
+
+                # Plot 1: Window fraction vs radius
+                ax1.plot(radii, window_fractions, 'b-', linewidth=2)
+                ax1.axhline(y=center_window_fraction, color='r', linestyle='--', label=f'Linear ({center_window_fraction:.2f}×R)', alpha=0.5)
+                ax1.set_xlabel('Skyrmion Radius (pixels)')
+                ax1.set_ylabel('Window Fraction')
+                ax1.set_title('Center Window Fraction')
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
+
+                # Plot 2: Window size vs radius
+                ax2.plot(radii, window_sizes, 'b-', linewidth=2, label='Logarithmic')
+                ax2.plot(radii, center_window_fraction * radii, 'r--', alpha=0.5, label='Linear')
+                ax2.set_xlabel('Skyrmion Radius (pixels)')
+                ax2.set_ylabel('Window Size (pixels)')
+                ax2.set_title('Absolute Window Size')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                st.pyplot(fig_preview)
+                plt.close(fig_preview)
+
+                # Example calculations
+                st.markdown("**Example Window Sizes:**")
+                example_radii = [15, 20, 30, 50, 80]
+                examples = []
+                for r in example_radii:
+                    frac = max(0.08, window_scale_a + window_scale_b * np.log(r))
+                    size = frac * r
+                    examples.append(f"**Radius {r}px**: {frac:.3f}×R = {size:.1f}px")
+                st.markdown(" | ".join(examples))
+            else:
+                # Use linear scaling (fixed fraction)
+                window_scale_a = -0.27  # Not used
+                window_scale_b = 0.13   # Not used
+
+        # Deprecated parameter (kept for backward compatibility but hidden)
+        center_falloff_sigma = 0.2  # Not used anymore, replaced by center_window_fraction
+
+        st.markdown("---")
+
+        # ============================================================
+        # SINGLE IMAGE MODE
+        # ============================================================
+        if detection_mode == "📄 Single Image":
+            st.subheader("Upload LTEM Image")
+
+            uploaded_image = st.file_uploader(
+                "Choose an LTEM image",
+                type=['jpg', 'jpeg', 'png', 'tif', 'tiff'],
+                help="Upload a grayscale LTEM image showing skyrmions"
+            )
+
+            if uploaded_image is not None:
+                with st.spinner('🔄 Loading ML model and processing image...'):
+                    try:
+                        # Save uploaded file temporarily
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_image.name) as tmp_file:
+                            tmp_file.write(uploaded_image.getvalue())
+                            tmp_path = tmp_file.name
+
+                        # Import ML pipeline
+                        import sys
+                        sys.path.insert(0, str(Path(__file__).parent / 'ml_pipeline'))
+                        from ml_pipeline.extract_properties import SkyrmionPropertyExtractor
+
+                        # Initialize extractor (loads model)
+                        # Note: Parameters are passed directly, no caching for classifier parameters
+                        @st.cache_resource
+                        def load_model_only():
+                            # Only cache the StarDist model loading (expensive)
+                            from ml_pipeline.extract_properties import SkyrmionPropertyExtractor
+                            return SkyrmionPropertyExtractor(
+                                peak_prominence=0.15,  # Default, will be overridden
+                                center_falloff_sigma=0.2,
+                                skyrmionium_threshold=0.3
+                            )
+
+                        # Create extractor with ALL current slider values
+                        extractor = SkyrmionPropertyExtractor(
+                            peak_prominence=peak_prominence,
+                            center_falloff_sigma=center_falloff_sigma,
+                            skyrmionium_threshold=skyrmionium_threshold,
+                            center_window_fraction=center_window_fraction,
+                            top_n_angles=top_n_angles,
+                            merge_threshold=merge_threshold,
+                            width_bonus_enabled=width_bonus_enabled,
+                            use_nonlinear_window=use_nonlinear_window,
+                            window_scale_a=window_scale_a,
+                            window_scale_b=window_scale_b,
+                            angle_selection_mode=angle_selection_mode,
+                            selected_angles=selected_angles
+                        )
+
+                        # Process image
+                        properties, labels = extractor.process_image(
+                            tmp_path,
+                            pixel_scale=pixel_scale,
+                            save_visualization=False,
+                            output_dir=None
+                        )
+
+                        if len(properties) == 0:
+                            # Clean up temp file
+                            Path(tmp_path).unlink()
+                            st.warning("⚠️ No skyrmions detected in this image.")
+                        else:
+                            st.success(f"✅ Detected {len(properties)} skyrmions!")
+
+                            # Summary metrics
+                            n_skyrmions = (properties['classification'] == 'skyrmion').sum()
+                            n_skyrmioniums = (properties['classification'] == 'skyrmionium').sum()
+
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Total Detected", len(properties))
+                            with col2:
+                                st.metric("Skyrmions (Q=±1)", n_skyrmions)
+                            with col3:
+                                st.metric("Skyrmioniums (Q=0)", n_skyrmioniums)
+                            with col4:
+                                q_ratio = n_skyrmioniums / len(properties) if len(properties) > 0 else 0
+                                st.metric("Q=0 Fraction", f"{q_ratio:.1%}")
+
+                            # Visualizations
+                            st.markdown("---")
+                            st.subheader("📊 Results")
+
+                            tab1, tab2, tab3 = st.tabs(["🎯 Detection Overlay", "📊 Properties", "📈 Distributions"])
+
+                            with tab1:
+                                # Show classification overlay
+                                if show_classification_viz:
+                                    import plotly.graph_objects as go
+                                    from plotly.subplots import make_subplots
+
+                                    # Load original image for visualization
+                                    image_normalized, image_raw = extractor.load_image(tmp_path)
+
+                                    # Create matplotlib visualization with color-coded circles
+                                    from matplotlib.patches import Circle as MPLCircle
+
+                                    fig_mpl, ax = plt.subplots(1, 1, figsize=(12, 12))
+                                    ax.imshow(image_raw, cmap='gray')
+
+                                    # Add color-coded circles and ID labels
+                                    unit_suffix = 'nm' if pixel_scale else 'px'
+                                    n_skyrmions = 0
+                                    n_skyrmioniums = 0
+
+                                    for _, row in properties.iterrows():
+                                        # Color based on classification
+                                        if row['classification'] == 'skyrmion':
+                                            color = 'blue'
+                                            n_skyrmions += 1
+                                        else:
+                                            color = 'red'
+                                            n_skyrmioniums += 1
+
+                                        # Radius for circle
+                                        unit_col = f'diameter_{unit_suffix}'
+                                        diameter = row.get(unit_col, row.get('diameter_px', 0))
+                                        radius = diameter / 2
+
+                                        # Draw circle
+                                        circle = MPLCircle(
+                                            (row['centroid_x'], row['centroid_y']),
+                                            radius,
+                                            fill=False,
+                                            edgecolor=color,
+                                            linewidth=2,
+                                            alpha=0.9
+                                        )
+                                        ax.add_patch(circle)
+
+                                        # Add ID label inside circle with background box
+                                        ax.text(
+                                            row['centroid_x'],
+                                            row['centroid_y'],
+                                            str(row['label_id']),
+                                            color='white',
+                                            fontsize=9,
+                                            fontweight='bold',
+                                            ha='center',
+                                            va='center',
+                                            bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.6, edgecolor='none')
+                                        )
+
+                                    ax.set_title(
+                                        f"Skyrmion Detection: {n_skyrmions} Skyrmions (blue), {n_skyrmioniums} Skyrmioniums (red)",
+                                        fontsize=14,
+                                        fontweight='bold'
+                                    )
+                                    ax.axis('off')
+                                    plt.tight_layout()
+
+                                    st.pyplot(fig_mpl)
+
+                                    # Add diagnostic button with pagination
+                                    st.markdown("---")
+
+                                    # Initialize session state for diagnostics
+                                    if 'diag_page' not in st.session_state:
+                                        st.session_state.diag_page = 1
+                                    if 'diag_total_pages' not in st.session_state:
+                                        st.session_state.diag_total_pages = 1
+
+                                    if st.button("🔬 Run Classification Diagnostics"):
+                                        st.session_state.diag_page = 1  # Reset to page 1
+                                        with st.spinner('Analyzing radial profiles...'):
+                                            import sys
+                                            sys.path.insert(0, str(Path(__file__).parent / 'ml_pipeline'))
+                                            from diagnose_classifier import diagnose_classification
+
+                                            # Run diagnostics with ALL current UI parameters
+                                            try:
+                                                # Calculate total pages first (50 skyrmions per page)
+                                                total_pages = diagnose_classification(
+                                                    tmp_path,
+                                                    labels_path=None,
+                                                    n_examples=None,  # Show ALL skyrmions
+                                                    peak_prominence=peak_prominence,
+                                                    center_falloff_sigma=center_falloff_sigma,
+                                                    skyrmionium_threshold=skyrmionium_threshold,
+                                                    center_window_fraction=center_window_fraction,
+                                                    top_n_angles=top_n_angles,
+                                                    merge_threshold=merge_threshold,
+                                                    width_bonus_enabled=width_bonus_enabled,
+                                                    use_nonlinear_window=use_nonlinear_window,
+                                                    window_scale_a=window_scale_a,
+                                                    window_scale_b=window_scale_b,
+                                                    angle_selection_mode=angle_selection_mode,
+                                                    selected_angles=selected_angles,
+                                                    page=st.session_state.diag_page,
+                                                    page_size=50
+                                                )
+                                                st.session_state.diag_total_pages = total_pages
+                                                st.success(f"✓ Generated diagnostics (Page {st.session_state.diag_page} of {total_pages})")
+                                            except Exception as e:
+                                                st.error(f"Error running diagnostics: {e}")
+                                                st.exception(e)
+
+                                    # Display diagnostic image if it exists
+                                    diag_path = Path('ml_pipeline/results') / f'classifier_diagnostics_{Path(tmp_path).stem}_page{st.session_state.diag_page}.png'
+                                    if diag_path.exists():
+                                        # Pagination controls
+                                        col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
+                                        with col1:
+                                            if st.button("⏮️ First", disabled=(st.session_state.diag_page <= 1)):
+                                                st.session_state.diag_page = 1
+                                                st.rerun()
+                                        with col2:
+                                            if st.button("◀️ Previous", disabled=(st.session_state.diag_page <= 1)):
+                                                st.session_state.diag_page -= 1
+                                                st.rerun()
+                                        with col3:
+                                            st.markdown(f"<div style='text-align: center; padding: 5px;'><b>Page {st.session_state.diag_page} of {st.session_state.diag_total_pages}</b><br/><small>Showing skyrmions {(st.session_state.diag_page-1)*50 + 1}-{min(st.session_state.diag_page*50, len(properties))}</small></div>", unsafe_allow_html=True)
+                                        with col4:
+                                            if st.button("Next ▶️", disabled=(st.session_state.diag_page >= st.session_state.diag_total_pages)):
+                                                st.session_state.diag_page += 1
+                                                st.rerun()
+                                        with col5:
+                                            if st.button("Last ⏭️", disabled=(st.session_state.diag_page >= st.session_state.diag_total_pages)):
+                                                st.session_state.diag_page = st.session_state.diag_total_pages
+                                                st.rerun()
+
+                                        # Check if current page needs to be generated
+                                        current_page_path = Path('ml_pipeline/results') / f'classifier_diagnostics_{Path(tmp_path).stem}_page{st.session_state.diag_page}.png'
+                                        if not current_page_path.exists():
+                                            with st.spinner(f'Loading page {st.session_state.diag_page}...'):
+                                                import sys
+                                                sys.path.insert(0, str(Path(__file__).parent / 'ml_pipeline'))
+                                                from diagnose_classifier import diagnose_classification
+
+                                                try:
+                                                    diagnose_classification(
+                                                        tmp_path,
+                                                        labels_path=None,
+                                                        n_examples=None,
+                                                        peak_prominence=peak_prominence,
+                                                        center_falloff_sigma=center_falloff_sigma,
+                                                        skyrmionium_threshold=skyrmionium_threshold,
+                                                        center_window_fraction=center_window_fraction,
+                                                        top_n_angles=top_n_angles,
+                                                        merge_threshold=merge_threshold,
+                                                        width_bonus_enabled=width_bonus_enabled,
+                                                        use_nonlinear_window=use_nonlinear_window,
+                                                        window_scale_a=window_scale_a,
+                                                        window_scale_b=window_scale_b,
+                                                        angle_selection_mode=angle_selection_mode,
+                                                        selected_angles=selected_angles,
+                                                        page=st.session_state.diag_page,
+                                                        page_size=50
+                                                    )
+                                                except Exception as e:
+                                                    st.error(f"Error generating page {st.session_state.diag_page}: {e}")
+
+                                        # Display the image
+                                        st.image(str(current_page_path), caption=f"Topological Classifier Diagnostics - Page {st.session_state.diag_page}", use_column_width=True)
+                                        st.info("""
+                                        **How to interpret diagnostics:**
+                                        - **Left**: Skyrmion patch with detected boundary
+                                        - **Middle**: Diameter profiles at 4 angles (0°, 45°, 90°, 135°)
+                                        - **Right**: Classification scores per angle and final decision
+
+                                        If classification seems random, LTEM contrast may be too low for reliable distinction.
+                                        Consider supervised training with manually labeled examples.
+                                        """)
+
+                            with tab2:
+                                # Properties table
+                                st.markdown("### Detected Skyrmion Properties")
+
+                                # Select relevant columns for display
+                                unit_suffix = 'nm' if pixel_scale else 'px'
+                                display_cols = [
+                                    'label_id', 'classification', 'topological_charge', 'confidence',
+                                    'centroid_x', 'centroid_y',
+                                    f'area_{unit_suffix}', f'diameter_{unit_suffix}',
+                                    'circularity', 'mean_intensity'
+                                ]
+
+                                # Filter columns that exist
+                                available_cols = [col for col in display_cols if col in properties.columns]
+                                st.dataframe(properties[available_cols], height=400)
+
+                                # Download button
+                                csv = properties.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download Properties as CSV",
+                                    data=csv,
+                                    file_name=f"ml_detected_{uploaded_image.name.rsplit('.', 1)[0]}.csv",
+                                    mime="text/csv"
+                                )
+
+                            with tab3:
+                                # Distribution plots
+                                st.markdown("### Size Distribution by Topological Charge")
+
+                                fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+                                # Size distribution
+                                unit_col = f'diameter_{unit_suffix}'
+                                skyrmion_sizes = properties[properties['classification'] == 'skyrmion'][unit_col]
+                                skyrmionium_sizes = properties[properties['classification'] == 'skyrmionium'][unit_col]
+
+                                axes[0].hist(skyrmion_sizes, bins=15, alpha=0.7, label='Skyrmions (Q=±1)', color='blue', edgecolor='black')
+                                axes[0].hist(skyrmionium_sizes, bins=15, alpha=0.7, label='Skyrmioniums (Q=0)', color='red', edgecolor='black')
+                                axes[0].set_xlabel(f'Diameter ({unit_suffix})')
+                                axes[0].set_ylabel('Count')
+                                axes[0].set_title('Size Distribution by Topological Charge')
+                                axes[0].legend()
+                                axes[0].grid(alpha=0.3)
+
+                                # Confidence distribution
+                                axes[1].hist(properties['confidence'], bins=20, alpha=0.7, color='green', edgecolor='black')
+                                axes[1].set_xlabel('Classification Confidence')
+                                axes[1].set_ylabel('Count')
+                                axes[1].set_title('Topological Classification Confidence')
+                                axes[1].axvline(properties['confidence'].mean(), color='red', linestyle='--', label='Mean')
+                                axes[1].legend()
+                                axes[1].grid(alpha=0.3)
+
+                                plt.tight_layout()
+                                st.pyplot(fig)
+                                plt.close()
+
+                                # Statistical summary
+                                st.markdown("### Statistical Summary")
+                                col1, col2 = st.columns(2)
+
+                                with col1:
+                                    st.markdown("**Skyrmions (Q=±1)**")
+                                    if len(skyrmion_sizes) > 0:
+                                        st.write(f"Count: {len(skyrmion_sizes)}")
+                                        st.write(f"Mean diameter: {skyrmion_sizes.mean():.2f} {unit_suffix}")
+                                        st.write(f"Std diameter: {skyrmion_sizes.std():.2f} {unit_suffix}")
+                                    else:
+                                        st.write("None detected")
+
+                                with col2:
+                                    st.markdown("**Skyrmioniums (Q=0)**")
+                                    if len(skyrmionium_sizes) > 0:
+                                        st.write(f"Count: {len(skyrmionium_sizes)}")
+                                        st.write(f"Mean diameter: {skyrmionium_sizes.mean():.2f} {unit_suffix}")
+                                        st.write(f"Std diameter: {skyrmionium_sizes.std():.2f} {unit_suffix}")
+                                    else:
+                                        st.write("None detected")
+
+                            # Clean up temp file
+                            Path(tmp_path).unlink()
+
+                    except Exception as e:
+                        # Clean up temp file on error
+                        if 'tmp_path' in locals():
+                            try:
+                                Path(tmp_path).unlink()
+                            except:
+                                pass
+                        st.error(f"❌ Error during ML detection: {e}")
+                        st.exception(e)
+
+        # ============================================================
+        # TEMPERATURE SERIES MODE
+        # ============================================================
+        elif detection_mode == "📁 Temperature Series (Multiple Images)":
+            st.subheader("Upload Temperature Series")
+            st.markdown("Upload multiple LTEM images from a temperature series for batch processing and tracking.")
+
+            uploaded_images = st.file_uploader(
+                "Choose LTEM images",
+                type=['jpg', 'jpeg', 'png', 'tif', 'tiff'],
+                accept_multiple_files=True,
+                help="Upload multiple images (e.g., 110K.jpg, 120K.jpg, etc.)"
+            )
+
+            if uploaded_images:
+                st.info(f"📁 {len(uploaded_images)} images uploaded")
+
+                if st.button("🚀 Start ML Detection", type="primary"):
+                    with st.spinner('🔄 Processing images with ML pipeline...'):
+                        try:
+                            # Import ML pipeline
+                            import sys
+                            sys.path.insert(0, str(Path(__file__).parent / 'ml_pipeline'))
+                            from ml_pipeline.extract_properties import SkyrmionPropertyExtractor
+
+                            # Initialize extractor
+                            @st.cache_resource
+                            def load_extractor():
+                                return SkyrmionPropertyExtractor()
+
+                            extractor = load_extractor()
+
+                            # Save images temporarily
+                            temp_paths = []
+                            for uploaded_image in uploaded_images:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_image.name) as tmp_file:
+                                    tmp_file.write(uploaded_image.getvalue())
+                                    temp_paths.append(tmp_file.name)
+
+                            # Process batch
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+
+                            all_properties = []
+                            for i, (tmp_path, uploaded_image) in enumerate(zip(temp_paths, uploaded_images)):
+                                status_text.text(f"Processing {i+1}/{len(temp_paths)}: {uploaded_image.name}")
+
+                                try:
+                                    props, labels = extractor.process_image(
+                                        tmp_path,
+                                        pixel_scale=pixel_scale,
+                                        save_visualization=False,
+                                        output_dir=None
+                                    )
+
+                                    if len(props) > 0:
+                                        props['image_name'] = uploaded_image.name
+                                        props['image_index'] = i
+                                        all_properties.append(props)
+
+                                except Exception as e:
+                                    st.warning(f"⚠️ Error processing {uploaded_image.name}: {e}")
+
+                                progress_bar.progress((i + 1) / len(temp_paths))
+
+                            # Clean up temp files
+                            for tmp_path in temp_paths:
+                                Path(tmp_path).unlink()
+
+                            status_text.text("✅ Processing complete!")
+
+                            if not all_properties:
+                                st.error("❌ No skyrmions detected in any images")
+                            else:
+                                # Combine results
+                                combined_props = pd.concat(all_properties, ignore_index=True)
+
+                                st.success(f"✅ Detected {len(combined_props)} total skyrmions across {len(uploaded_images)} images")
+
+                                # Summary statistics
+                                st.markdown("---")
+                                st.subheader("📊 Batch Summary")
+
+                                col1, col2, col3, col4 = st.columns(4)
+                                with col1:
+                                    st.metric("Images Processed", len(uploaded_images))
+                                with col2:
+                                    st.metric("Total Skyrmions", len(combined_props))
+                                with col3:
+                                    n_sky = (combined_props['classification'] == 'skyrmion').sum()
+                                    st.metric("Skyrmions (Q=±1)", n_sky)
+                                with col4:
+                                    n_skx = (combined_props['classification'] == 'skyrmionium').sum()
+                                    st.metric("Skyrmioniums (Q=0)", n_skx)
+
+                                # Per-image summary
+                                st.markdown("---")
+                                st.subheader("📋 Per-Image Results")
+
+                                image_summary = combined_props.groupby('image_name').agg({
+                                    'label_id': 'count',
+                                    'topological_charge': lambda x: (x == 1).sum(),
+                                    'confidence': 'mean'
+                                }).rename(columns={
+                                    'label_id': 'total_detected',
+                                    'topological_charge': 'n_skyrmions',
+                                    'confidence': 'mean_confidence'
+                                })
+                                image_summary['n_skyrmioniums'] = image_summary['total_detected'] - image_summary['n_skyrmions']
+
+                                st.dataframe(image_summary, use_container_width=True)
+
+                                # Download combined results
+                                st.markdown("---")
+                                csv = combined_props.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download All Properties as CSV",
+                                    data=csv,
+                                    file_name="ml_batch_detection_results.csv",
+                                    mime="text/csv"
+                                )
+
+                                # Trend visualization
+                                st.markdown("---")
+                                st.subheader("📈 Detection Trends Across Series")
+
+                                fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+                                # Count trends
+                                axes[0].plot(image_summary.index, image_summary['total_detected'], marker='o', label='Total', linewidth=2)
+                                axes[0].plot(image_summary.index, image_summary['n_skyrmions'], marker='s', label='Skyrmions', linewidth=2)
+                                axes[0].plot(image_summary.index, image_summary['n_skyrmioniums'], marker='^', label='Skyrmioniums', linewidth=2)
+                                axes[0].set_xlabel('Image')
+                                axes[0].set_ylabel('Count')
+                                axes[0].set_title('Detection Counts Across Series')
+                                axes[0].legend()
+                                axes[0].grid(alpha=0.3)
+                                axes[0].tick_params(axis='x', rotation=45)
+
+                                # Size trends
+                                unit_suffix = 'nm' if pixel_scale else 'px'
+                                size_col = f'diameter_{unit_suffix}'
+                                size_by_image = combined_props.groupby('image_name')[size_col].mean()
+                                axes[1].plot(size_by_image.index, size_by_image.values, marker='o', linewidth=2, color='purple')
+                                axes[1].set_xlabel('Image')
+                                axes[1].set_ylabel(f'Mean Diameter ({unit_suffix})')
+                                axes[1].set_title('Mean Skyrmion Size Across Series')
+                                axes[1].grid(alpha=0.3)
+                                axes[1].tick_params(axis='x', rotation=45)
+
+                                plt.tight_layout()
+                                st.pyplot(fig)
+                                plt.close()
+
+                        except Exception as e:
+                            st.error(f"❌ Error during batch ML detection: {e}")
+                            st.exception(e)
 
 
 if __name__ == "__main__":

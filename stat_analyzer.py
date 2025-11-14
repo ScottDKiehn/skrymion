@@ -883,7 +883,7 @@ Examples:
     return parser
 
 
-def plot_size_histogram(skyrmion_data, metadata=None, bins='auto', show_kde=True):
+def plot_size_histogram(skyrmion_data, metadata=None, bins='auto', show_kde=True, scale_factor=1.0, unit_name='pixels'):
   """
   Create histogram of skyrmion sizes with statistical overlay.
 
@@ -897,6 +897,10 @@ def plot_size_histogram(skyrmion_data, metadata=None, bins='auto', show_kde=True
       Number of bins or method ('auto', 'sturges', 'fd', etc.)
   show_kde : bool
       If True, overlay kernel density estimate
+  scale_factor : float
+      Scale factor to convert pixels to physical units (default: 1.0)
+  unit_name : str
+      Name of the physical unit (default: 'pixels')
 
   Returns:
   --------
@@ -907,30 +911,43 @@ def plot_size_histogram(skyrmion_data, metadata=None, bins='auto', show_kde=True
   fig, ax = plt.subplots(figsize=(10, 6))
 
   areas = skyrmion_data['Area'].values
+  # Convert area to diameter: d = 2 * sqrt(A/π)
+  diameters = 2 * np.sqrt(areas / np.pi) * scale_factor
 
-  # Create histogram
-  n, bins_edges, patches = ax.hist(areas, bins=bins, alpha=0.7, 
+  # Create histogram with percentage y-axis
+  weights = np.ones_like(diameters) / len(diameters) * 100
+
+  # Fix: Compute bin edges first if using automatic estimation (doesn't work with weights)
+  if isinstance(bins, str):
+      bins = np.histogram_bin_edges(diameters, bins=bins)
+
+  n, bins_edges, patches = ax.hist(diameters, bins=bins, alpha=0.7,
                                       color='steelblue', edgecolor='black',
-                                      density=True, label='Data')
+                                      weights=weights, label='Data')
 
-  # Add KDE overlay if requested
+  # Add KDE overlay if requested (scaled to percentage)
   if show_kde:
-      kde = stats.gaussian_kde(areas)
-      x_range = np.linspace(areas.min(), areas.max(), 200)
-      ax.plot(x_range, kde(x_range), 'r-', linewidth=2, 
+      kde = stats.gaussian_kde(diameters)
+      x_range = np.linspace(diameters.min(), diameters.max(), 200)
+      # Scale KDE to match percentage histogram
+      kde_values = kde(x_range)
+      # Integrate KDE to get proper scaling
+      bin_width = (diameters.max() - diameters.min()) / (len(np.histogram(diameters, bins=bins)[0]))
+      kde_scaled = kde_values * bin_width * 100
+      ax.plot(x_range, kde_scaled, 'r-', linewidth=2,
               label='Kernel Density Estimate')
 
   # Statistical lines
-  mean_area = areas.mean()
-  median_area = np.median(areas)
-  ax.axvline(mean_area, color='darkgreen', linestyle='--', linewidth=2, 
-              label=f'Mean: {mean_area:.1f}')
-  ax.axvline(median_area, color='orange', linestyle='--', linewidth=2, 
-              label=f'Median: {median_area:.1f}')
+  mean_diameter = diameters.mean()
+  median_diameter = np.median(diameters)
+  ax.axvline(mean_diameter, color='darkgreen', linestyle='--', linewidth=2,
+              label=f'Mean: {mean_diameter:.1f}')
+  ax.axvline(median_diameter, color='orange', linestyle='--', linewidth=2,
+              label=f'Median: {median_diameter:.1f}')
 
   # Labels and title
-  ax.set_xlabel('Skyrmion Area (pixels²)', fontsize=12, fontweight='bold')
-  ax.set_ylabel('Probability Density', fontsize=12, fontweight='bold')
+  ax.set_xlabel(f'Skyrmion Diameter ({unit_name})', fontsize=12, fontweight='bold')
+  ax.set_ylabel('Percentage (%)', fontsize=12, fontweight='bold')
 
   if metadata:
       title = f"Size Distribution: Field={metadata['field']}Oe, T={metadata['temperature']}K"
@@ -942,12 +959,12 @@ def plot_size_histogram(skyrmion_data, metadata=None, bins='auto', show_kde=True
   ax.grid(True, alpha=0.3)
 
   # Add statistics text box
-  stats_text = f"n = {len(areas)}\n"
-  stats_text += f"Mean = {mean_area:.1f} ± {areas.std():.1f}\n"
-  stats_text += f"Median = {median_area:.1f}\n"
-  stats_text += f"Range = [{areas.min():.0f}, {areas.max():.0f}]\n"
-  stats_text += f"Skewness = {stats.skew(areas):.2f}\n"
-  stats_text += f"Kurtosis = {stats.kurtosis(areas):.2f}"
+  stats_text = f"n = {len(diameters)}\n"
+  stats_text += f"Mean Diameter = {mean_diameter:.1f} ± {diameters.std():.1f} {unit_name}\n"
+  stats_text += f"Median Diameter = {median_diameter:.1f} {unit_name}\n"
+  stats_text += f"Range = [{diameters.min():.1f}, {diameters.max():.1f}] {unit_name}\n"
+  stats_text += f"Skewness = {stats.skew(diameters):.2f}\n"
+  stats_text += f"Kurtosis = {stats.kurtosis(diameters):.2f}"
 
   ax.text(0.98, 0.97, stats_text, transform=ax.transAxes,
           verticalalignment='top', horizontalalignment='right',
@@ -959,45 +976,52 @@ def plot_size_histogram(skyrmion_data, metadata=None, bins='auto', show_kde=True
   return fig, ax
 
 
-def assess_distribution_modality(skyrmion_data):
+def assess_distribution_modality(skyrmion_data, scale_factor=1.0, unit_name='pixels'):
     """
     Assess whether size distribution is unimodal or multimodal.
     Uses Hartigan's dip test for unimodality.
-    
+
     Parameters:
     -----------
     skyrmion_data : pandas DataFrame
         DataFrame with Area column
-    
+    scale_factor : float
+        Scale factor to convert pixels to physical units (default: 1.0)
+    unit_name : str
+        Name of the physical unit (default: 'pixels')
+
     Returns:
     --------
     assessment : dict
         Dictionary with modality assessment results
     """
     from scipy import stats
-    
+
     areas = skyrmion_data['Area'].values
-    
+    # Convert to diameter for assessment
+    diameters = 2 * np.sqrt(areas / np.pi) * scale_factor
+
     # Basic statistics
-    skewness = stats.skew(areas)
-    kurtosis = stats.kurtosis(areas)
-    
+    skewness = stats.skew(diameters)
+    kurtosis = stats.kurtosis(diameters)
+
     # Simple bimodality coefficient (BC)
     # BC > 0.555 suggests bimodality for n > 20
-    n = len(areas)
+    n = len(diameters)
     BC = (skewness**2 + 1) / (kurtosis + 3 * (n-1)**2 / ((n-2)*(n-3)))
-    
+
     assessment = {
         'n_skyrmions': n,
-        'mean': areas.mean(),
-        'std': areas.std(),
+        'mean': diameters.mean(),
+        'std': diameters.std(),
         'skewness': skewness,
         'kurtosis': kurtosis,
         'bimodality_coefficient': BC,
         'likely_bimodal': BC > 0.555 if n > 20 else None,
-        'interpretation': ''
+        'interpretation': '',
+        'unit_name': unit_name
     }
-    
+
     # Interpretation
     if n < 20:
         assessment['interpretation'] = "Sample size too small for reliable modality assessment"
@@ -1005,7 +1029,7 @@ def assess_distribution_modality(skyrmion_data):
         assessment['interpretation'] = f"Distribution suggests bimodality (BC={BC:.3f} > 0.555). This may indicate multiple topological charge populations."
     else:
         assessment['interpretation'] = f"Distribution appears unimodal (BC={BC:.3f} < 0.555). This suggests a single topological charge phase."
-    
+
     return assessment
 
 
