@@ -348,7 +348,11 @@ def assess_distribution_modality(skyrmion_data, scale_factor=1.0, unit_name='pix
     assessment = {
         'n_skyrmions': n,
         'mean': diameters.mean(),
+        'median': np.median(diameters),
         'std': diameters.std(),
+        'min': diameters.min(),
+        'max': diameters.max(),
+        'range': diameters.max() - diameters.min(),
         'skewness': skewness,
         'kurtosis': kurtosis,
         'bimodality_coefficient': BC,
@@ -411,7 +415,11 @@ def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, s
 
         # Size distribution modality metrics (already in converted units from modality)
         f'mean_diameter_{unit_display}': modality['mean'],
+        f'median_diameter_{unit_display}': modality['median'],
         f'std_diameter_{unit_display}': modality['std'],
+        f'min_diameter_{unit_display}': modality['min'],
+        f'max_diameter_{unit_display}': modality['max'],
+        f'range_diameter_{unit_display}': modality['range'],
         'skewness': modality['skewness'],
         'kurtosis': modality['kurtosis'],
         'bimodality_coefficient': modality['bimodality_coefficient'],
