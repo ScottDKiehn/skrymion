@@ -303,78 +303,221 @@ def print_stats(stats):
 
 from scipy.spatial import Voronoi, voronoi_plot_2d
 from scipy.spatial import cKDTree
+from scipy.spatial.distance import pdist, squareform
 
-def calculate_voronoi_coordination(skyrmion_data):
+def calculate_voronoi_coordination(skyrmion_data, neighbor_distance_factor=3.0):
     """
-    Calculate coordination numbers using Voronoi tessellation.
-    
-    The Voronoi tessellation divides space into regions (cells) where each 
-    region contains all points closest to a particular skyrmion. Skyrmions
-    whose cells share an edge are neighbors.
-    
+    Calculate coordination numbers using both distance-aware and Voronoi methods.
+
+    Distance-aware method: Uses adaptive Heaviside cutoff where each skyrmion pair
+    has a cutoff distance = neighbor_distance_factor × (r_i + r_j) / 2, where r = sqrt(Area/π).
+
+    Default factor of 2.0 accounts for lattice spacing. Increase if lattice is sparse,
+    decrease if skyrmions are densely packed.
+
+    Voronoi method: Traditional topological neighbors (cells sharing edges).
+
     Parameters:
     -----------
     skyrmion_data : pandas DataFrame
         DataFrame with Area, X, Y columns
-    
+    neighbor_distance_factor : float, optional (default=3.0)
+        Multiplier for neighbor cutoff distance.
+        - 1.0 = touching skyrmions (r_i + r_j) / 2
+        - 2.0 = moderate spacing
+        - 3.0 = typical lattice spacing (recommended default)
+
     Returns:
     --------
     coord_stats : dict
-        Dictionary with coordination statistics
+        Dictionary with coordination statistics (now includes both methods)
     skyrmion_data : pandas DataFrame
-        Cleaned dataframe with added 'coordination' column
+        Cleaned dataframe with added 'coordination' and 'topological_coordination' columns
     vor : scipy.spatial.Voronoi
         Voronoi object for visualization
+    neighbor_dict_distance : dict
+        Distance-based neighbor relationships (point_idx -> set of neighbor indices)
     """
     # Clean data: remove any rows with NaN values
     skyrmion_data_clean = skyrmion_data.dropna(subset=['X', 'Y', 'Area']).copy()
-    
+
     n_removed = len(skyrmion_data) - len(skyrmion_data_clean)
     if n_removed > 0:
         print(f"  ⚠ Removed {n_removed} skyrmions with missing position/area data")
-    
-    # Extract positions as array
+
+    # Extract positions and areas
     points = skyrmion_data_clean[['X', 'Y']].values
-    
+    areas = skyrmion_data_clean['Area'].values
+
     if len(points) < 4:
         raise ValueError(f"Not enough valid points for Voronoi tessellation (need ≥4, have {len(points)})")
-    
-    # Compute Voronoi tessellation
+
+    # Calculate radii for each skyrmion: r = sqrt(Area/π)
+    radii = np.sqrt(areas / np.pi)
+
+    # === DISTANCE-AWARE COORDINATION ===
+    # Calculate pairwise distances
+    dist_matrix = squareform(pdist(points))
+
+    # Build distance-based neighbor dictionary with adaptive cutoff
+    neighbor_dict_distance = {i: set() for i in range(len(points))}
+    distance_coordination = np.zeros(len(points), dtype=int)
+
+    for i in range(len(points)):
+        for j in range(i + 1, len(points)):
+            # Adaptive cutoff: factor × average radius of the pair
+            # Average radius of pair = (r_i + r_j) / 2
+            avg_radius = (radii[i] + radii[j]) / 2
+            cutoff_distance = neighbor_distance_factor * avg_radius
+
+            if dist_matrix[i, j] <= cutoff_distance:
+                neighbor_dict_distance[i].add(j)
+                neighbor_dict_distance[j].add(i)
+                distance_coordination[i] += 1
+                distance_coordination[j] += 1
+
+    # === VORONOI TOPOLOGICAL COORDINATION ===
+    # Compute Voronoi tessellation for visualization and comparison
     vor = Voronoi(points)
-    
-    # Calculate coordination number for each skyrmion
-    coordination_numbers = []
-    
+
     # vor.ridge_points contains pairs of point indices that share a Voronoi edge
-    # This tells us which skyrmions are neighbors
-    neighbor_dict = {i: set() for i in range(len(points))}
-    
+    neighbor_dict_voronoi = {i: set() for i in range(len(points))}
+
     for point_pair in vor.ridge_points:
-        # Each pair shares an edge, so they're neighbors
-        neighbor_dict[point_pair[0]].add(point_pair[1])
-        neighbor_dict[point_pair[1]].add(point_pair[0])
-    
-    # Coordination number = number of neighbors
-    coordination_numbers = [len(neighbors) for neighbors in neighbor_dict.values()]
-    
-    # Add coordination to dataframe
-    skyrmion_data_clean['coordination'] = coordination_numbers
-    
-    # Calculate statistics
+        neighbor_dict_voronoi[point_pair[0]].add(point_pair[1])
+        neighbor_dict_voronoi[point_pair[1]].add(point_pair[0])
+
+    topological_coordination = np.array([len(neighbors) for neighbors in neighbor_dict_voronoi.values()])
+
+    # Add both coordination columns to dataframe
+    skyrmion_data_clean['coordination'] = distance_coordination  # Primary (distance-aware)
+    skyrmion_data_clean['topological_coordination'] = topological_coordination  # For comparison
+
+    # Calculate statistics for DISTANCE-AWARE coordination (primary)
     coord_stats = {
-        'mean_coordination': np.mean(coordination_numbers),
-        'median_coordination': np.median(coordination_numbers),
-        'std_coordination': np.std(coordination_numbers),
-        'min_coordination': np.min(coordination_numbers),
-        'max_coordination': np.max(coordination_numbers),
-        'coordination_distribution': np.bincount(coordination_numbers),
+        # Distance-aware metrics (primary)
+        'mean_coordination': np.mean(distance_coordination),
+        'median_coordination': np.median(distance_coordination),
+        'std_coordination': np.std(distance_coordination),
+        'min_coordination': np.min(distance_coordination),
+        'max_coordination': np.max(distance_coordination),
+        'coordination_distribution': np.bincount(distance_coordination),
+
+        # Topological metrics (for comparison)
+        'mean_topological_coordination': np.mean(topological_coordination),
+        'median_topological_coordination': np.median(topological_coordination),
+        'std_topological_coordination': np.std(topological_coordination),
+
+        # Mean radius for reference
+        'mean_radius_pixels': np.mean(radii),
+        'std_radius_pixels': np.std(radii),
+
+        # Cutoff parameters
+        'neighbor_distance_factor': neighbor_distance_factor,
+        'mean_cutoff_distance': neighbor_distance_factor * np.mean(radii),
     }
-    
+
     # Calculate "packing efficiency" - how close to ideal hexagonal packing (6 neighbors)
     ideal_coordination = 6  # Hexagonal close packing
-    coord_stats['packing_efficiency'] = np.mean(coordination_numbers) / ideal_coordination
-    
-    return coord_stats, skyrmion_data_clean, vor
+    coord_stats['packing_efficiency'] = np.mean(distance_coordination) / ideal_coordination
+    coord_stats['topological_packing_efficiency'] = np.mean(topological_coordination) / ideal_coordination
+
+    return coord_stats, skyrmion_data_clean, vor, neighbor_dict_distance
+
+
+def calculate_bond_orientation_order(skyrmion_data, neighbor_dict):
+    """
+    Calculate bond orientation order parameter (hexagonal symmetry).
+
+    For each skyrmion, computes the local 6-fold bond orientation order:
+        φ_i = (1/N_i) × Σ_j exp(i × 6 × θ_j)
+    where θ_j is the angle of the bond to neighbor j, and N_i is the number of neighbors.
+
+    Also computes global order parameter across all bonds in the system.
+
+    Parameters:
+    -----------
+    skyrmion_data : pandas DataFrame
+        DataFrame with X, Y columns (must match indices used in neighbor_dict)
+    neighbor_dict : dict
+        Dictionary mapping skyrmion index -> set of neighbor indices
+
+    Returns:
+    --------
+    bond_order_results : dict
+        Dictionary containing:
+        - 'local_phi': numpy array of |φ_i| for each skyrmion (0-1, 1=perfect hexagonal order)
+        - 'global_phi': complex global order parameter
+        - 'global_phi_magnitude': |φ_global|
+        - 'mean_local_phi': mean of local |φ| values
+        - 'std_local_phi': std of local |φ| values
+        - 'median_local_phi': median of local |φ| values
+        - 'min_local_phi': minimum local |φ|
+        - 'max_local_phi': maximum local |φ|
+    """
+    points = skyrmion_data[['X', 'Y']].values
+    n_skyrmions = len(points)
+
+    # Array to store local bond orientation order for each skyrmion
+    local_phi = np.zeros(n_skyrmions, dtype=complex)
+    local_phi_magnitude = np.zeros(n_skyrmions)
+
+    # List to collect all bond angles for global order parameter
+    all_bond_angles = []
+
+    # Calculate local order parameter for each skyrmion
+    for i in range(n_skyrmions):
+        neighbors = list(neighbor_dict[i])
+        n_neighbors = len(neighbors)
+
+        if n_neighbors == 0:
+            # Isolated skyrmion has undefined order
+            local_phi_magnitude[i] = 0.0
+            continue
+
+        # Calculate bond angles to all neighbors
+        bond_angles = []
+        for j in neighbors:
+            # Vector from skyrmion i to neighbor j
+            dx = points[j, 0] - points[i, 0]
+            dy = points[j, 1] - points[i, 1]
+
+            # Bond angle (in radians)
+            theta = np.arctan2(dy, dx)
+            bond_angles.append(theta)
+            all_bond_angles.append(theta)  # Also collect for global calculation
+
+        # Compute local 6-fold order parameter
+        # φ_i = (1/N) × Σ exp(i × 6 × θ)
+        bond_angles = np.array(bond_angles)
+        phi_i = np.mean(np.exp(1j * 6 * bond_angles))
+
+        local_phi[i] = phi_i
+        local_phi_magnitude[i] = np.abs(phi_i)
+
+    # Calculate global order parameter (average over all bonds)
+    if len(all_bond_angles) > 0:
+        all_bond_angles = np.array(all_bond_angles)
+        global_phi = np.mean(np.exp(1j * 6 * all_bond_angles))
+        global_phi_magnitude = np.abs(global_phi)
+    else:
+        global_phi = 0.0
+        global_phi_magnitude = 0.0
+
+    # Compile statistics
+    bond_order_results = {
+        'local_phi': local_phi_magnitude,  # Return magnitudes (real values)
+        'local_phi_complex': local_phi,    # Keep complex values for advanced analysis
+        'global_phi': global_phi,
+        'global_phi_magnitude': global_phi_magnitude,
+        'mean_local_phi': np.mean(local_phi_magnitude),
+        'std_local_phi': np.std(local_phi_magnitude),
+        'median_local_phi': np.median(local_phi_magnitude),
+        'min_local_phi': np.min(local_phi_magnitude),
+        'max_local_phi': np.max(local_phi_magnitude),
+    }
+
+    return bond_order_results
 
 
 def visualize_voronoi(skyrmion_data, vor, title="Voronoi Tessellation"):

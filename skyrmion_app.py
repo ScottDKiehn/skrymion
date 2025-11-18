@@ -16,6 +16,7 @@ from stat_analyzer import (
     parse_filename,
     calculate_basic_stats,
     calculate_voronoi_coordination,
+    calculate_bond_orientation_order,
     visualize_skyrmions,
     visualize_voronoi,
     print_stats,
@@ -43,46 +44,68 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-def process_uploaded_file(uploaded_file):
+def process_uploaded_file(uploaded_file, neighbor_distance_factor=3.0):
     """
     Process a single uploaded file.
-    
+
     Returns:
     --------
     df : DataFrame with skyrmion data
     metadata : dict with file metadata
     stats : dict with basic statistics
     coord_stats : dict with coordination statistics
-    df_with_coord : DataFrame with coordination numbers
+    bond_order_stats : dict with bond orientation order statistics
+    df_with_coord : DataFrame with coordination numbers and bond order
     vor : Voronoi object
+    neighbor_dict : dict with neighbor relationships
     """
     # Save uploaded file to temporary location
     with tempfile.NamedTemporaryFile(delete=False, suffix=uploaded_file.name) as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_path = tmp_file.name
-    
+
     try:
         # Load data
         df = load_skyrmion_file(tmp_path)
         df = df[['Area', 'X', 'Y']].dropna()
-        
+
         # Parse metadata from ORIGINAL filename, not temp path
         metadata = parse_filename(uploaded_file.name)  # ← FIXED: use original name
         metadata['filename'] = uploaded_file.name
-        
+
+        # Calculate basic statistics
         stats = calculate_basic_stats(df, metadata)
-        coord_stats, df_with_coord, vor = calculate_voronoi_coordination(df)
-        
-        return df, metadata, stats, coord_stats, df_with_coord, vor
-        
+
+        # Calculate coordination (both distance-aware and topological)
+        coord_stats, df_with_coord, vor, neighbor_dict = calculate_voronoi_coordination(
+            df, neighbor_distance_factor=neighbor_distance_factor
+        )
+
+        # Calculate bond orientation order parameter
+        bond_order_stats = calculate_bond_orientation_order(df_with_coord, neighbor_dict)
+
+        # Add local bond order to dataframe
+        df_with_coord['bond_order'] = bond_order_stats['local_phi']
+
+        return df, metadata, stats, coord_stats, bond_order_stats, df_with_coord, vor, neighbor_dict
+
     finally:
         # Clean up temp file
         Path(tmp_path).unlink()
 
 
-def display_stats_cards(stats, coord_stats):
+def fig_to_bytes(fig, format='png', dpi=300):
+    """Convert matplotlib figure to bytes for download."""
+    buf = io.BytesIO()
+    fig.savefig(buf, format=format, dpi=dpi, bbox_inches='tight')
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def display_stats_cards(stats, coord_stats, bond_order_stats=None):
     """Display statistics in nice cards."""
-    col1, col2, col3, col4 = st.columns(4)
+    # Main metrics in 5 columns
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         st.metric("🔢 Skyrmion Count", f"{stats['n_skyrmions']}")
@@ -100,6 +123,11 @@ def display_stats_cards(stats, coord_stats):
         st.metric("🔗 Mean Coord.", f"{coord_stats['mean_coordination']:.2f}")
         st.metric("📦 Packing Eff.", f"{coord_stats['packing_efficiency']:.2%}")
 
+    with col5:
+        if bond_order_stats:
+            st.metric("🔷 Mean Bond Order", f"{bond_order_stats['mean_local_phi']:.3f}")
+            st.metric("🌐 Global φ", f"{bond_order_stats['global_phi_magnitude']:.3f}")
+
     # Add CN distribution summary below cards
     coord_dist = coord_stats['coordination_distribution']
     cn_values = np.arange(len(coord_dist))
@@ -113,6 +141,19 @@ def display_stats_cards(stats, coord_stats):
     top_cn_text = ", ".join([f"CN={cn_present[i]}: {percentages[i]:.1f}%" for i in top_indices])
 
     st.caption(f"**Top Coordination Numbers**: {top_cn_text}")
+
+    # Add bond order interpretation
+    if bond_order_stats:
+        mean_phi = bond_order_stats['mean_local_phi']
+        if mean_phi > 0.9:
+            order_interpretation = "Highly ordered hexagonal lattice"
+        elif mean_phi > 0.7:
+            order_interpretation = "Moderately ordered lattice"
+        elif mean_phi > 0.5:
+            order_interpretation = "Weakly ordered lattice"
+        else:
+            order_interpretation = "Disordered/liquid-like state"
+        st.caption(f"**Lattice Order**: {order_interpretation}")
 
 
 def plot_interactive_scatter(df_with_coord, metadata, scale_factor=1.0, unit_name='pixels'):
@@ -404,6 +445,133 @@ def plot_coordination_distribution(coord_stats, metadata):
     return fig
 
 
+def plot_phi_scatter(df_with_coord, metadata, scale_factor=1.0, unit_name='pixels'):
+    """Create scatter plot colored by local bond orientation order parameter |φ|."""
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Apply scale factor for display
+    x_scaled = df_with_coord['X'] * scale_factor
+    y_scaled = df_with_coord['Y'] * scale_factor
+
+    scatter = ax.scatter(
+        x_scaled,
+        y_scaled,
+        s=df_with_coord['Area'] / 5,
+        alpha=0.6,
+        c=df_with_coord['bond_order'],
+        cmap='viridis',  # viridis: purple (disordered) → yellow (ordered)
+        vmin=0,
+        vmax=1,
+        edgecolors='black',
+        linewidth=0.5
+    )
+
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label('Bond Orientation Order |φ|', rotation=270, labelpad=20)
+
+    ax.set_xlabel(f'X Position ({unit_name})', fontsize=12)
+    ax.set_ylabel(f'Y Position ({unit_name})', fontsize=12)
+    ax.set_title(f"Bond Order: Field={metadata['field']}Oe, T={metadata['temperature']}K",
+                 fontsize=14, fontweight='bold')
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3)
+
+    return fig
+
+
+def plot_cn_phi_correlation(df_with_coord, metadata, scale_factor=1.0, unit_name='pixels'):
+    """Create correlation plot showing relationship between CN and bond orientation order."""
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Size points by skyrmion area
+    sizes = df_with_coord['Area'] * (scale_factor ** 2) / 10
+
+    scatter = ax.scatter(
+        df_with_coord['coordination'],
+        df_with_coord['bond_order'],
+        s=sizes,
+        alpha=0.5,
+        c=df_with_coord['bond_order'],
+        cmap='viridis',
+        edgecolors='black',
+        linewidth=0.5
+    )
+
+    # Calculate and display correlation
+    correlation = np.corrcoef(df_with_coord['coordination'], df_with_coord['bond_order'])[0, 1]
+
+    ax.set_xlabel('Coordination Number (CN)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Bond Orientation Order |φ|', fontsize=12, fontweight='bold')
+    ax.set_title(f"CN vs Bond Order: Field={metadata['field']}Oe, T={metadata['temperature']}K\n" +
+                 f"Correlation: {correlation:.3f}",
+                 fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim([-0.05, 1.05])
+
+    # Add reference lines
+    ax.axhline(y=0.9, color='red', linestyle='--', alpha=0.5, label='High order threshold (0.9)')
+    ax.axvline(x=6, color='green', linestyle='--', alpha=0.5, label='Ideal CN (6)')
+    ax.legend(loc='lower right')
+
+    # Add text box with statistics
+    stats_text = f"Mean CN: {df_with_coord['coordination'].mean():.2f}\n"
+    stats_text += f"Mean |φ|: {df_with_coord['bond_order'].mean():.3f}\n"
+    stats_text += f"Correlation: {correlation:.3f}"
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+            verticalalignment='top', fontsize=10, family='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_interactive_scatter_toggle(df_with_coord, metadata, color_by='coordination', scale_factor=1.0, unit_name='pixels'):
+    """Create scatter plot with toggle between CN and bond order coloring."""
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # Apply scale factor for display
+    x_scaled = df_with_coord['X'] * scale_factor
+    y_scaled = df_with_coord['Y'] * scale_factor
+
+    if color_by == 'coordination':
+        c_values = df_with_coord['coordination']
+        cmap = 'RdYlGn'
+        vmin, vmax = 3, 7
+        label = 'Coordination Number'
+    else:  # color_by == 'bond_order'
+        c_values = df_with_coord['bond_order']
+        cmap = 'viridis'
+        vmin, vmax = 0, 1
+        label = 'Bond Orientation Order |φ|'
+
+    scatter = ax.scatter(
+        x_scaled,
+        y_scaled,
+        s=df_with_coord['Area'] / 5,
+        alpha=0.6,
+        c=c_values,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        edgecolors='black',
+        linewidth=0.5
+    )
+
+    cbar = plt.colorbar(scatter, ax=ax)
+    cbar.set_label(label, rotation=270, labelpad=20)
+
+    ax.set_xlabel(f'X Position ({unit_name})', fontsize=12)
+    ax.set_ylabel(f'Y Position ({unit_name})', fontsize=12)
+    ax.set_title(f"Skyrmion Lattice: Field={metadata['field']}Oe, T={metadata['temperature']}K",
+                 fontsize=14, fontweight='bold')
+    ax.set_aspect('equal')
+    ax.invert_yaxis()
+    ax.grid(True, alpha=0.3)
+
+    return fig
+
+
 def assess_distribution_modality(skyrmion_data, scale_factor=1.0, unit_name='pixels'):
     """Assess whether size distribution is unimodal or multimodal."""
     from scipy import stats
@@ -450,7 +618,7 @@ def assess_distribution_modality(skyrmion_data, scale_factor=1.0, unit_name='pix
     return assessment
 
 
-def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, scale_factor, unit_display):
+def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, scale_factor, unit_display, bond_order_stats=None):
     """
     Create a summary statistics DataFrame for CSV export.
 
@@ -506,7 +674,7 @@ def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, s
         'bimodality_coefficient': modality['bimodality_coefficient'],
         'likely_bimodal': modality.get('likely_bimodal', None),
 
-        # Coordination statistics
+        # Coordination statistics (distance-aware)
         'mean_coordination': coord_stats['mean_coordination'],
         'median_coordination': coord_stats['median_coordination'],
         'std_coordination': coord_stats['std_coordination'],
@@ -514,10 +682,29 @@ def create_summary_dataframe(filename, metadata, stats, coord_stats, modality, s
         'max_coordination': coord_stats['max_coordination'],
         'packing_efficiency': coord_stats['packing_efficiency'],
 
+        # Topological coordination (for comparison)
+        'mean_topological_coordination': coord_stats.get('mean_topological_coordination', None),
+        'topological_packing_efficiency': coord_stats.get('topological_packing_efficiency', None),
+
+        # Mean radius
+        'mean_radius_px': coord_stats.get('mean_radius_pixels', None),
+        'std_radius_px': coord_stats.get('std_radius_pixels', None),
+
         # Units
         'scale_factor': scale_factor,
         'unit_name': unit_display
     }
+
+    # Add bond orientation order statistics if provided
+    if bond_order_stats:
+        summary.update({
+            'mean_local_bond_order': bond_order_stats['mean_local_phi'],
+            'std_local_bond_order': bond_order_stats['std_local_phi'],
+            'median_local_bond_order': bond_order_stats['median_local_phi'],
+            'min_local_bond_order': bond_order_stats['min_local_phi'],
+            'max_local_bond_order': bond_order_stats['max_local_phi'],
+            'global_bond_order_magnitude': bond_order_stats['global_phi_magnitude'],
+        })
 
     # Convert to single-row DataFrame
     return pd.DataFrame([summary])
@@ -564,6 +751,21 @@ def main():
         unit_display = unit_name
 
     st.sidebar.markdown("---")
+    st.sidebar.markdown("### Coordination Settings")
+
+    neighbor_distance_factor = st.sidebar.slider(
+        "Neighbor Distance Factor",
+        min_value=1.0,
+        max_value=4.0,
+        value=3.0,
+        step=0.1,
+        help="Multiplier for neighbor cutoff distance. Default 3.0 works for typical skyrmion lattices."
+    )
+
+    st.sidebar.caption(f"**Cutoff:** {neighbor_distance_factor:.1f} × avg(r_i, r_j)")
+    st.sidebar.caption("**Tip:** Decrease to 2.0 for denser packing, increase to 3.5+ for very sparse lattices")
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown("### About")
     st.sidebar.info(
         "This app analyzes LTEM skyrmion data, calculating:\n"
@@ -589,14 +791,16 @@ def main():
         if uploaded_file is not None:
             with st.spinner('🔄 Processing file...'):
                 try:
-                    df, metadata, stats, coord_stats, df_with_coord, vor = process_uploaded_file(uploaded_file)
+                    df, metadata, stats, coord_stats, bond_order_stats, df_with_coord, vor, neighbor_dict = process_uploaded_file(
+                        uploaded_file, neighbor_distance_factor
+                    )
                     
                     st.success(f"✅ Successfully loaded: {uploaded_file.name}")
                     
                     # Display statistics
                     st.markdown("---")
                     st.subheader("📊 Statistics")
-                    display_stats_cards(stats, coord_stats)
+                    display_stats_cards(stats, coord_stats, bond_order_stats)
                     
                     # NEW: Size Distribution Analysis
                     st.markdown("---")
@@ -652,17 +856,54 @@ def main():
                     st.markdown("---")
                     st.subheader("📈 Visualizations")
 
-                    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🎯 Scatter Plot", "🕸️ Voronoi Diagram",
-                                                       "📊 Size Histogram", "🔗 Coordination Distribution", "📋 Data Table"])
+                    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+                        "🎯 Overview", "🕸️ Voronoi", "📊 Size Distribution",
+                        "🔗 Coordination", "🔷 Bond Order", "📋 Data & Export"
+                    ])
+
+                    # Store all figures for bulk download
+                    all_figures = {}
 
                     with tab1:
-                        fig1 = plot_interactive_scatter(df_with_coord, metadata, scale_factor, unit_display)
-                        st.pyplot(fig1)
+                        st.markdown("### Skyrmion Lattice Overview")
+                        st.markdown("Toggle between coordination number and bond orientation order coloring.")
+
+                        # Toggle selector
+                        color_mode = st.radio(
+                            "Color by:",
+                            options=['Coordination Number (CN)', 'Bond Orientation Order (φ)'],
+                            horizontal=True
+                        )
+
+                        color_by = 'coordination' if 'Coordination' in color_mode else 'bond_order'
+
+                        fig_overview = plot_interactive_scatter_toggle(df_with_coord, metadata, color_by, scale_factor, unit_display)
+                        st.pyplot(fig_overview)
+                        all_figures['overview_scatter'] = fig_overview
+
+                        # Download button for this figure
+                        st.download_button(
+                            label=f"📥 Download {color_mode} Scatter Plot",
+                            data=fig_to_bytes(fig_overview),
+                            file_name=f"scatter_{color_by}_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
                         plt.close()
 
                     with tab2:
-                        fig2 = plot_voronoi_diagram(df_with_coord, vor, metadata, scale_factor, unit_display)
-                        st.pyplot(fig2)
+                        st.markdown("### Voronoi Tessellation")
+                        st.markdown("Voronoi cells show regions of space closest to each skyrmion. Shared edges indicate topological neighbors.")
+
+                        fig_voronoi = plot_voronoi_diagram(df_with_coord, vor, metadata, scale_factor, unit_display)
+                        st.pyplot(fig_voronoi)
+                        all_figures['voronoi'] = fig_voronoi
+
+                        st.download_button(
+                            label="📥 Download Voronoi Diagram",
+                            data=fig_to_bytes(fig_voronoi),
+                            file_name=f"voronoi_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
                         plt.close()
 
                     with tab3:
@@ -679,9 +920,17 @@ def main():
                             bins_choice = st.selectbox("Bins", ['auto', 'sturges', 'fd', 'sqrt', 10, 15, 20, 30])
                             show_kde = st.checkbox("Show KDE", value=True)
 
-                        fig3 = plot_size_histogram(df_with_coord, metadata, bins=bins_choice, show_kde=show_kde,
+                        fig_histogram = plot_size_histogram(df_with_coord, metadata, bins=bins_choice, show_kde=show_kde,
                                                     scale_factor=scale_factor, unit_name=unit_display)
-                        st.pyplot(fig3)
+                        st.pyplot(fig_histogram)
+                        all_figures['size_histogram'] = fig_histogram
+
+                        st.download_button(
+                            label="📥 Download Size Histogram",
+                            data=fig_to_bytes(fig_histogram),
+                            file_name=f"histogram_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
                         plt.close()
 
                         # Box and whisker plot
@@ -693,8 +942,16 @@ def main():
                         Whiskers extend to 1.5×IQR, and points beyond are marked as outliers.
                         """)
 
-                        fig_box = plot_size_boxplot(df_with_coord, metadata, scale_factor=scale_factor, unit_name=unit_display)
-                        st.pyplot(fig_box)
+                        fig_boxplot = plot_size_boxplot(df_with_coord, metadata, scale_factor=scale_factor, unit_name=unit_display)
+                        st.pyplot(fig_boxplot)
+                        all_figures['size_boxplot'] = fig_boxplot
+
+                        st.download_button(
+                            label="📥 Download Box Plot",
+                            data=fig_to_bytes(fig_boxplot),
+                            file_name=f"boxplot_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
                         plt.close()
 
                         # Additional statistical tests
@@ -710,9 +967,9 @@ def main():
 
                     with tab4:
                         # Coordination distribution tab
-                        st.markdown("### Coordination Number Distribution")
+                        st.markdown("### Coordination Analysis")
                         st.markdown("""
-                        **Coordination number** indicates how many nearest neighbors each skyrmion has.
+                        **Coordination number** (CN) is calculated using distance-aware method with adaptive cutoff.
                         Ideal hexagonal packing has CN=6. Deviations indicate structural disorder or defects.
                         """)
 
@@ -728,11 +985,81 @@ def main():
                         st.info(f"**Distribution**: {cn_summary}")
 
                         # Plot coordination distribution
-                        fig4 = plot_coordination_distribution(coord_stats, metadata)
-                        st.pyplot(fig4)
+                        fig_coord_dist = plot_coordination_distribution(coord_stats, metadata)
+                        st.pyplot(fig_coord_dist)
+                        all_figures['coordination_distribution'] = fig_coord_dist
+
+                        st.download_button(
+                            label="📥 Download Coordination Distribution",
+                            data=fig_to_bytes(fig_coord_dist),
+                            file_name=f"coord_dist_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
+                        plt.close()
+
+                        # CN vs Bond Order Correlation
+                        st.markdown("---")
+                        st.markdown("### Coordination vs Bond Orientation Correlation")
+                        st.markdown("""
+                        Correlation between CN and bond orientation order reveals the interplay between
+                        structural packing and local hexagonal symmetry.
+                        """)
+
+                        fig_correlation = plot_cn_phi_correlation(df_with_coord, metadata, scale_factor, unit_display)
+                        st.pyplot(fig_correlation)
+                        all_figures['cn_phi_correlation'] = fig_correlation
+
+                        st.download_button(
+                            label="📥 Download CN vs φ Correlation",
+                            data=fig_to_bytes(fig_correlation),
+                            file_name=f"cn_phi_correlation_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
                         plt.close()
 
                     with tab5:
+                        # Bond orientation order tab
+                        st.markdown("### Bond Orientation Order Parameter")
+                        st.markdown("""
+                        **Bond orientation order** (φ) measures local hexagonal symmetry:
+                        - φ = 1: Perfect hexagonal order
+                        - φ = 0: Random/disordered orientation
+                        - Calculated using 6-fold symmetry: φ = (1/N)∑exp(i×6×θ)
+                        """)
+
+                        # Display bond order statistics
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Mean |φ|", f"{bond_order_stats['mean_local_phi']:.3f}")
+                        with col2:
+                            st.metric("Global |φ|", f"{bond_order_stats['global_phi_magnitude']:.3f}")
+                        with col3:
+                            mean_phi = bond_order_stats['mean_local_phi']
+                            if mean_phi > 0.9:
+                                order_label = "Highly Ordered"
+                                delta_color = "normal"
+                            elif mean_phi > 0.7:
+                                order_label = "Moderately Ordered"
+                                delta_color = "normal"
+                            else:
+                                order_label = "Disordered"
+                                delta_color = "inverse"
+                            st.metric("Lattice State", order_label)
+
+                        # Plot bond order scatter
+                        fig_phi_scatter = plot_phi_scatter(df_with_coord, metadata, scale_factor, unit_display)
+                        st.pyplot(fig_phi_scatter)
+                        all_figures['phi_scatter'] = fig_phi_scatter
+
+                        st.download_button(
+                            label="📥 Download Bond Order Scatter Plot",
+                            data=fig_to_bytes(fig_phi_scatter),
+                            file_name=f"phi_scatter_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                            mime="image/png"
+                        )
+                        plt.close()
+
+                    with tab6:
                         st.dataframe(df_with_coord, width='stretch')
 
                         st.markdown("---")
@@ -769,7 +1096,8 @@ def main():
                                 coord_stats,
                                 modality,
                                 scale_factor,
-                                unit_display
+                                unit_display,
+                                bond_order_stats
                             )
                             csv_summary = df_summary.to_csv(index=False)
                             st.download_button(
@@ -781,7 +1109,7 @@ def main():
                             )
 
                         with col3:
-                            # ZIP download with both files
+                            # ZIP download with both CSV files
                             zip_buffer = io.BytesIO()
                             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                                 # Add per-skyrmion CSV
@@ -796,13 +1124,71 @@ def main():
                                 )
 
                             st.download_button(
-                                label="📦 Download Both (ZIP)",
+                                label="📦 Download Both Data CSVs",
                                 data=zip_buffer.getvalue(),
-                                file_name=f"analysis_package_{uploaded_file.name.rsplit('.', 1)[0]}.zip",
+                                file_name=f"data_package_{uploaded_file.name.rsplit('.', 1)[0]}.zip",
                                 mime="application/zip",
                                 help="ZIP file containing both per-skyrmion data and summary statistics"
                             )
-                
+
+                        # Figure Downloads Section
+                        st.markdown("---")
+                        st.markdown("### 🖼️ Download Figures")
+
+                        # Create ZIP with all figures
+                        figures_zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(figures_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                            for fig_name, fig in all_figures.items():
+                                fig_bytes = fig_to_bytes(fig)
+                                zip_file.writestr(
+                                    f"{fig_name}_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                                    fig_bytes
+                                )
+
+                        # Single button to download all figures
+                        st.download_button(
+                            label="📦 Download All Figures (ZIP)",
+                            data=figures_zip_buffer.getvalue(),
+                            file_name=f"all_figures_{uploaded_file.name.rsplit('.', 1)[0]}.zip",
+                            mime="application/zip",
+                            help=f"ZIP file containing all {len(all_figures)} visualization figures",
+                            type="primary"
+                        )
+
+                        # Ultimate Download Everything Section
+                        st.markdown("---")
+                        st.markdown("### 🎁 Download EVERYTHING")
+
+                        # Create master ZIP with all data and figures
+                        everything_zip_buffer = io.BytesIO()
+                        with zipfile.ZipFile(everything_zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                            # Add per-skyrmion CSV
+                            zip_file.writestr(
+                                f"data/analyzed_{uploaded_file.name.rsplit('.', 1)[0]}.csv",
+                                csv_skyrmions
+                            )
+                            # Add summary CSV
+                            zip_file.writestr(
+                                f"data/summary_{uploaded_file.name.rsplit('.', 1)[0]}.csv",
+                                csv_summary
+                            )
+                            # Add all figures
+                            for fig_name, fig in all_figures.items():
+                                fig_bytes = fig_to_bytes(fig)
+                                zip_file.writestr(
+                                    f"figures/{fig_name}_{uploaded_file.name.rsplit('.', 1)[0]}.png",
+                                    fig_bytes
+                                )
+
+                        st.download_button(
+                            label="🎁 Download EVERYTHING (Data + Figures)",
+                            data=everything_zip_buffer.getvalue(),
+                            file_name=f"complete_analysis_{uploaded_file.name.rsplit('.', 1)[0]}.zip",
+                            mime="application/zip",
+                            help=f"Master ZIP containing: 2 CSV files (per-skyrmion data + summary stats) + {len(all_figures)} PNG figures",
+                            type="primary"
+                        )
+
                 except Exception as e:
                     st.error(f"❌ Error processing file: {e}")
                     st.exception(e)
@@ -844,16 +1230,20 @@ def main():
                     
                     for i, uploaded_file in enumerate(uploaded_files):
                         status_text.text(f"Processing {i+1}/{len(uploaded_files)}: {uploaded_file.name}")
-                        
+
                         try:
-                            df, metadata, stats, coord_stats, df_with_coord, vor = process_uploaded_file(uploaded_file)
-                            
+                            df, metadata, stats, coord_stats, bond_order_stats, df_with_coord, vor, neighbor_dict = process_uploaded_file(
+                                uploaded_file, neighbor_distance_factor
+                            )
+
                             # Combine results
                             result = {
                                 **metadata,
                                 **stats,
-                                **{f'coord_{k}': v for k, v in coord_stats.items() 
-                                   if k != 'coordination_distribution'}
+                                **{f'coord_{k}': v for k, v in coord_stats.items()
+                                   if k != 'coordination_distribution'},
+                                **{f'bond_{k}': v for k, v in bond_order_stats.items()
+                                   if k not in ['local_phi', 'local_phi_complex', 'global_phi']}  # Exclude arrays and complex numbers
                             }
                             results_list.append(result)
                             
@@ -1070,7 +1460,7 @@ def main():
                 "Peak Prominence",
                 min_value=0.01,
                 max_value=0.5,
-                value=0.15,
+                value=0.08,
                 step=0.01,
                 help="Minimum peak height to detect (lower = more sensitive)"
             )
@@ -1079,7 +1469,7 @@ def main():
                 "Center Window Size (NEW)",
                 min_value=0.1,
                 max_value=0.5,
-                value=0.3,
+                value=0.20,
                 step=0.05,
                 help="Radius fraction defining 'center region' for skyrmionium peaks (scales with skyrmion size)"
             )
@@ -1088,7 +1478,7 @@ def main():
                 "Skyrmionium Threshold",
                 min_value=0.0,
                 max_value=1.0,
-                value=0.3,
+                value=0.11,
                 step=0.01,
                 help="Classification cutoff (higher = fewer skyrmioniums)"
             )
@@ -1100,9 +1490,9 @@ def main():
                 "Top-N Angles (NEW)",
                 min_value=1,
                 max_value=4,
-                value=4,
+                value=3,
                 step=1,
-                help="Use only the best N diameter angles (2 recommended for noisy data)"
+                help="Use only the best N diameter angles (3 recommended for balanced detection)"
             )
         with col5:
             merge_threshold = st.slider(
@@ -1464,9 +1854,39 @@ def main():
                                                 st.error(f"Error running diagnostics: {e}")
                                                 st.exception(e)
 
+                                    # Check if current page needs to be generated FIRST (before displaying)
+                                    current_page_path = Path('ml_pipeline/results') / f'classifier_diagnostics_{Path(tmp_path).stem}_page{st.session_state.diag_page}.png'
+                                    if not current_page_path.exists():
+                                        with st.spinner(f'Loading page {st.session_state.diag_page}...'):
+                                            import sys
+                                            sys.path.insert(0, str(Path(__file__).parent / 'ml_pipeline'))
+                                            from diagnose_classifier import diagnose_classification
+
+                                            try:
+                                                diagnose_classification(
+                                                    tmp_path,
+                                                    labels_path=None,
+                                                    n_examples=None,
+                                                    peak_prominence=peak_prominence,
+                                                    center_falloff_sigma=center_falloff_sigma,
+                                                    skyrmionium_threshold=skyrmionium_threshold,
+                                                    center_window_fraction=center_window_fraction,
+                                                    top_n_angles=top_n_angles,
+                                                    merge_threshold=merge_threshold,
+                                                    width_bonus_enabled=width_bonus_enabled,
+                                                    use_nonlinear_window=use_nonlinear_window,
+                                                    window_scale_a=window_scale_a,
+                                                    window_scale_b=window_scale_b,
+                                                    angle_selection_mode=angle_selection_mode,
+                                                    selected_angles=selected_angles,
+                                                    page=st.session_state.diag_page,
+                                                    page_size=50
+                                                )
+                                            except Exception as e:
+                                                st.error(f"Error generating page {st.session_state.diag_page}: {e}")
+
                                     # Display diagnostic image if it exists
-                                    diag_path = Path('ml_pipeline/results') / f'classifier_diagnostics_{Path(tmp_path).stem}_page{st.session_state.diag_page}.png'
-                                    if diag_path.exists():
+                                    if current_page_path.exists():
                                         # Pagination controls
                                         col1, col2, col3, col4, col5 = st.columns([1, 1, 2, 1, 1])
                                         with col1:
@@ -1487,37 +1907,6 @@ def main():
                                             if st.button("Last ⏭️", disabled=(st.session_state.diag_page >= st.session_state.diag_total_pages)):
                                                 st.session_state.diag_page = st.session_state.diag_total_pages
                                                 st.rerun()
-
-                                        # Check if current page needs to be generated
-                                        current_page_path = Path('ml_pipeline/results') / f'classifier_diagnostics_{Path(tmp_path).stem}_page{st.session_state.diag_page}.png'
-                                        if not current_page_path.exists():
-                                            with st.spinner(f'Loading page {st.session_state.diag_page}...'):
-                                                import sys
-                                                sys.path.insert(0, str(Path(__file__).parent / 'ml_pipeline'))
-                                                from diagnose_classifier import diagnose_classification
-
-                                                try:
-                                                    diagnose_classification(
-                                                        tmp_path,
-                                                        labels_path=None,
-                                                        n_examples=None,
-                                                        peak_prominence=peak_prominence,
-                                                        center_falloff_sigma=center_falloff_sigma,
-                                                        skyrmionium_threshold=skyrmionium_threshold,
-                                                        center_window_fraction=center_window_fraction,
-                                                        top_n_angles=top_n_angles,
-                                                        merge_threshold=merge_threshold,
-                                                        width_bonus_enabled=width_bonus_enabled,
-                                                        use_nonlinear_window=use_nonlinear_window,
-                                                        window_scale_a=window_scale_a,
-                                                        window_scale_b=window_scale_b,
-                                                        angle_selection_mode=angle_selection_mode,
-                                                        selected_angles=selected_angles,
-                                                        page=st.session_state.diag_page,
-                                                        page_size=50
-                                                    )
-                                                except Exception as e:
-                                                    st.error(f"Error generating page {st.session_state.diag_page}: {e}")
 
                                         # Display the image
                                         st.image(str(current_page_path), caption=f"Topological Classifier Diagnostics - Page {st.session_state.diag_page}", use_column_width=True)
