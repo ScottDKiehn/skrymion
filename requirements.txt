@@ -1,0 +1,12 @@
+numpy
+pandas
+matplotlib
+scipy
+openpyxl
+streamlit
+plotly
+tqdm
+scikit-image
+pillow
+stardist
+tensorflow

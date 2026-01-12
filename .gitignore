@@ -1,0 +1,13 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
+
+# Logs (but keep model files)
+ml_pipeline_public/models/*/logs/
+
+# Results directory (generated at runtime)
+ml_pipeline_public/results/

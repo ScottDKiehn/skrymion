@@ -1,0 +1,15 @@
+{
+  "model_name": "nested_detector_20251210_171708",
+  "n_train_images": 40,
+  "n_val_images": 9,
+  "n_train_objects": 4772,
+  "n_val_objects": 1145,
+  "epochs": 50,
+  "thresholds": {
+    "prob": 0.7451705538262143,
+    "nms": 0.1
+  },
+  "validation_precision": 0.9670710571923743,
+  "validation_recall": 0.9755244755244755,
+  "validation_f1": 0.9712793733681462
+}
