@@ -10,3 +10,4 @@ scikit-image
 pillow
 stardist
 tensorflow
+scikit-learn==1.5.1
