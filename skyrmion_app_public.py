@@ -1818,6 +1818,8 @@ def main():
                                     # Update properties with ML classifications
                                     properties['classification'] = ml_classifications
                                     properties['ml_confidence'] = ml_confidences
+                                    # Also update topological_charge to match ML classification
+                                    properties['topological_charge'] = [0 if c == 'skyrmionium' else 1 for c in ml_classifications]
 
                                     # Filter by confidence threshold if set
                                     if ml_confidence_threshold > 0.5:
@@ -2085,8 +2087,13 @@ def main():
                                 available_cols = [col for col in display_cols if col in properties.columns]
                                 st.dataframe(properties[available_cols], height=400)
 
-                                # Download button
-                                csv = properties.to_csv(index=False)
+                                # Download button - add compatible columns for Single File Analysis
+                                export_df = properties.copy()
+                                # Add Area, X, Y columns for compatibility with Single File Analysis
+                                export_df['Area'] = export_df['area_px']
+                                export_df['X'] = export_df['centroid_x']
+                                export_df['Y'] = export_df['centroid_y']
+                                csv = export_df.to_csv(index=False)
                                 st.download_button(
                                     label="📥 Download Properties as CSV",
                                     data=csv,

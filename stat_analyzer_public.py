@@ -82,8 +82,13 @@ def parse_filename(filepath):
     filepath = Path(filepath)
     filename = filepath.name
 
+    # Strip common prefixes from ML Detection exports
+    base_name = filename
+    if base_name.startswith('ml_detected_'):
+        base_name = base_name[len('ml_detected_'):]
+
     # Fix encoding: Replace ĢŽ with full-width comma (for OL=2000/3000 files)
-    base_name = filename.replace('ĢŽ', '，')
+    base_name = base_name.replace('ĢŽ', '，')
 
     # Remove file extension and any "（new）" or "(new)" suffix
     base_name = base_name.replace('（new）', '').replace('(new)', '')

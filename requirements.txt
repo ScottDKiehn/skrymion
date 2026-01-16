@@ -8,6 +8,6 @@ plotly
 tqdm
 scikit-image
 pillow
-stardist
 tensorflow
-scikit-learn==1.5.1
+stardist
+scikit-learn
