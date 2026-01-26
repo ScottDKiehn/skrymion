@@ -2211,6 +2211,23 @@ def main():
                             progress_bar = st.progress(0)
                             status_text = st.empty()
 
+                            # Initialize Polar Fourier classifier for ML classification
+                            use_polar_fourier = CLASSIFIER_AVAILABLE
+                            pf_classifier = None
+                            if use_polar_fourier:
+                                try:
+                                    pf_classifier = PolarFourierClassifier(version=3)
+                                    model_path = Path(__file__).parent / 'ml_pipeline_public' / 'polar_fourier_v3_model.pkl'
+                                    if model_path.exists():
+                                        pf_classifier.load_model(str(model_path))
+                                        st.info("🤖 Using Polar Fourier v3 classifier for classification")
+                                    else:
+                                        st.warning("⚠️ Polar Fourier model not found, using algorithmic classifier")
+                                        use_polar_fourier = False
+                                except Exception as e:
+                                    st.warning(f"⚠️ Could not load Polar Fourier classifier: {e}")
+                                    use_polar_fourier = False
+
                             all_properties = []
                             for i, (tmp_path, uploaded_image) in enumerate(zip(temp_paths, uploaded_images)):
                                 status_text.text(f"Processing {i+1}/{len(temp_paths)}: {uploaded_image.name}")
@@ -2224,6 +2241,37 @@ def main():
                                     )
 
                                     if len(props) > 0:
+                                        # Apply Polar Fourier classification if available
+                                        if use_polar_fourier and pf_classifier is not None:
+                                            try:
+                                                # Load image for ML classification
+                                                image_for_ml = skio.imread(tmp_path)
+                                                if len(image_for_ml.shape) == 3:
+                                                    image_for_ml = image_for_ml.mean(axis=2)
+                                                image_for_ml = image_for_ml.astype(np.float32)
+                                                if image_for_ml.max() > 1:
+                                                    image_for_ml = image_for_ml / 255.0
+
+                                                # Classify each detection
+                                                ml_classifications = []
+                                                ml_confidences = []
+                                                for _, row in props.iterrows():
+                                                    cx, cy = row['centroid_x'], row['centroid_y']
+                                                    radius = row.get('diameter_px', 50) / 2
+
+                                                    pred, conf, feats = pf_classifier.classify(image_for_ml, cy, cx, radius)
+                                                    ml_classifications.append('skyrmionium' if pred == 0 else 'skyrmion')
+                                                    ml_confidences.append(conf)
+
+                                                # Update properties with ML classifications
+                                                props['classification'] = ml_classifications
+                                                props['ml_confidence'] = ml_confidences
+                                                props['topological_charge'] = [0 if c == 'skyrmionium' else 1 for c in ml_classifications]
+
+                                            except Exception as ml_err:
+                                                # Keep algorithmic classification on ML error
+                                                pass
+
                                         props['image_name'] = uploaded_image.name
                                         props['image_index'] = i
                                         all_properties.append(props)
